@@ -692,6 +692,23 @@ class PestIesSolver(PestSolver):
                 "pest_starting_par_ensemble.csv"
             )
 
+        # add a user-provided pcov (eg from an initial leastsquares solve)
+        if self.pcov is not None:
+            ies_pcov = self.pcov.copy()
+            ml_parname_to_pst = dict(zip(self.parameter_index.values(), self.parameter_index.keys()))
+            ies_pcov.index = [
+                ml_parname_to_pst[p] for p in ies_pcov.index
+                ]
+            ies_pcov.columns = [
+                ml_parname_to_pst[p] for p in ies_pcov.columns
+                ]
+            ies_pcov = pyemu.Cov(x=ies_pcov.values,names=ies_pcov.columns)
+            ies_pcov.to_ascii(self.model_ws / "pest.prior_parcov.mat")
+            ies_pcov.to_uncfile(self.model_ws / "pest.prior.unc", covmat_file="pest.prior_parcov.mat")
+            pst.pestpp_options["parcov"] = (
+                "pest.prior.unc"
+            )
+        
         pestpp_options = {} if pestpp_options is None else pestpp_options
         pst.pestpp_options.update(pestpp_options)
 
