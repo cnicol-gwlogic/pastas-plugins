@@ -175,6 +175,8 @@ class PestSolver(BaseSolver):
                     "constant_d",
                     pmax=np.max(observations.values) + np.std(observations.values),
                 )
+        else:
+            self.ml.settings["fit_constant"] = False
 
         par_sel = parameters.loc[:, ["optimal"]]
         par_sel.to_csv(self.model_ws / "parameters_sel.csv")
@@ -243,11 +245,20 @@ class PestSolver(BaseSolver):
             self.vary, "pmax"
         ].values
 
-        # add offset for default log transform (where needed - negative parlbnd)
-        log_mask = (pst.parameter_data.loc[:,"transform"].str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
+        # Add offset for default log transform (where needed - negative parlbnd).
+        # Generally a good idea to log transform, and parubnd of 0.0 (eg on WellModel_A) can cause issues with derinc.
+        # But for OD this did not help - was worse actually.
+        log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
         par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
-        pst.parameter_data.loc[log_mask, "offset"] = par_offsets
-        pst.parameter_data.loc[log_mask, "offset"] += par_offsets.abs()                                                                    
+        pst.parameter_data.loc[log_mask, ["offset"]] = par_offsets.values
+        pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]] = \
+                                         pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
+
+        # Check for 0.0 parubnd for no-transform pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
+        log_ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
+        pst.parameter_data.loc[log_ubnd0_mask, ["offset"]] = 0.1
+        pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
+                                         pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
         
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[:, ["pargp"]] = self.par_sel.columns.to_list()
