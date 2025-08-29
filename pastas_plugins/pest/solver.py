@@ -199,7 +199,7 @@ class PestSolver(BaseSolver):
         """
         pst.write(self.pf.new_d / "pest.pst", version=version)
 
-    def setup_files(self, version: int = 2):
+    def setup_files(self, version: int = 2, transform="none"):
         """Setup PEST file structure for optimization
 
         Parameters
@@ -215,7 +215,7 @@ class PestSolver(BaseSolver):
             use_cols=self.par_sel.columns.to_list(),
             par_type="grid",
             par_style="direct",
-            transform="log",
+            transform=transform,
             # pargp=self.par_sel.columns.to_list(),
             # par_name_base=self.par_sel.columns.to_list(), #[x.split("_")[0] for x in self.par_sel.columns],
             # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
@@ -637,6 +637,7 @@ class PestIesSolver(PestSolver):
         | None = None,
         pestpp_options: dict[str, Any] | None = None,
         silent: bool = False,
+        par_transform: str = "none",
     ) -> None:
         """
         Run ensemble simulations using pestpp-ies.
@@ -664,7 +665,7 @@ class PestIesSolver(PestSolver):
         None
         """
         self.setup_model()
-        self.setup_files()
+        self.setup_files(transform=par_transform)
 
         # change ies_num_reals
         pst = pyemu.Pst(str(self.temp_ws / "pest.pst"))
