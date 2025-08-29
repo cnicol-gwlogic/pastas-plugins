@@ -213,7 +213,7 @@ class PestSolver(BaseSolver):
             use_cols=self.par_sel.columns.to_list(),
             par_type="grid",
             par_style="direct",
-            transform="none",
+            transform="log",
             # pargp=self.par_sel.columns.to_list(),
             # par_name_base=self.par_sel.columns.to_list(), #[x.split("_")[0] for x in self.par_sel.columns],
             # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
@@ -242,6 +242,13 @@ class PestSolver(BaseSolver):
         pst.parameter_data.loc[:, ["parubnd"]] = self.ml.parameters.loc[
             self.vary, "pmax"
         ].values
+
+        # add offset for default log transform (where needed - negative parlbnd)
+        log_mask = (pst.parameter_data.loc[:,"transform"].str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
+        par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
+        pst.parameter_data.loc[log_mask, "offset"] = par_offsets
+        pst.parameter_data.loc[log_mask, "offset"] += par_offsets.abs()                                                                    
+        
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[:, ["pargp"]] = self.par_sel.columns.to_list()
         pst.control_data.noptmax = self.noptmax  # optimization runs
@@ -695,6 +702,7 @@ class PestIesSolver(PestSolver):
             ppw_kwargs={"ml": self.ml}
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
+            cleanup=False,
         )
 
         phidf = pd.read_csv(self.master_ws / "pest.phi.meas.csv", index_col=0)
