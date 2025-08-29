@@ -485,7 +485,7 @@ class PestHpSolver(PestSolver):
         copy_file(self.exe_agent, self.temp_ws)  # copy agent executable
 
     def solve(
-        self, silent: bool = False, **kwargs
+        self, silent: bool = False, par_transform: str = "none", **kwargs
     ) -> tuple[bool, NDArray[np.float64], NDArray[np.float64]]:
         """
         Solve the optimization problem using the pest_hp solver.
@@ -508,7 +508,7 @@ class PestHpSolver(PestSolver):
             The standard errors of the optimal parameters.
         """
         self.setup_model()
-        self.setup_files(version=1)
+        self.setup_files(version=1, transform=par_transform)
         # start consecutive thread for pest_hp and agent_hp excutable
         threads = [
             Thread(target=self.run, args=(f" /h :{self.port_number}", silent)),
