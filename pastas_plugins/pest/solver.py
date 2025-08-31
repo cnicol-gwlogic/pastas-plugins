@@ -304,9 +304,18 @@ class PestSolver(BaseSolver):
         )
 
     @staticmethod
-    def add_offsets(pst):
-        # Add offset for default log transform (where needed - negative parlbnd).
-        # Generally a good idea to log transform, and parubnd of 0.0 (eg on WellModel_A) can cause issues with derinc.
+    def add_offsets(pst) -> pyemu.Pst:
+        """
+        Add offset for default log transform (where needed - negative parlbnd).
+        Generally a good idea to log transform.
+        Check for 0.0 parubnd for transform==none pars and add an offset so
+        derinc can be calc'd by PEST_HP when pars are at 0.0
+
+        Parameters
+        ----------
+        pst : pyemu.Pst
+            Pyemu pest control file object.
+        """        
         log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
         par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
         pst.parameter_data.loc[log_mask, ["offset"]] = par_offsets.values
