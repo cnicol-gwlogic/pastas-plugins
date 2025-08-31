@@ -793,6 +793,14 @@ class PestIesSolver(PestSolver):
         ies_pcov.columns = [
             self.ml_parname_to_pst[p] for p in ies_pcov.columns
             ]
+
+        # TODO: If PestSolver.par_transform=="log": Convert pcov from Pastas untransformed space to log space. Is this even possible?
+        #       Or modify Pastas.model.residuals / model.simulation to  allow log-transformation of parameters provided to LSQ.
+        if self.par_transform == "log":
+            logger.warning(
+                "Provided pcov must pertain to log parameter space. This is currently unhandled."
+                )
+        
         # convert dataframe to pyemu.Cov object and write to disk, along with a .unc file pointing to it.
         ies_pcov = pyemu.Cov(x=ies_pcov.values,names=ies_pcov.columns)
         ies_pcov.to_ascii(self.model_ws / "pest.prior_parcov.mat")
