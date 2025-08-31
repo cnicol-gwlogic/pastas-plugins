@@ -93,6 +93,9 @@ class PestSolver(BaseSolver):
         port_number: int = 4004,
         use_pypestworker: bool = True,
         par_transform: str = "none",
+        par_group_settings: dict[
+            str, dict[str, Any]
+            ] | None = None,        
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -121,6 +124,10 @@ class PestSolver(BaseSolver):
             Whether to use the PyPestWorker for Python processing. Default is True.
         par_transform : Literal["none","log"], optional
             PEST parameter transformation. Default is "none".
+        par_group_settings : dict[str, dict[str, Any]]
+            Parameter group settings. Outer dict keyed by pargp. Inner dict keys
+            are pest setting keywords. Inner dict values are pest parameter group
+            values for the given keyword. Default is None.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -150,6 +157,9 @@ class PestSolver(BaseSolver):
         self.run_function: Callable = run
         self.ppw_function: Callable = run_pypestworker
         self.par_transform: Literal["none", "log"] = par_transform
+        self.par_group_settings: dict[
+            str, dict[str, Any]
+            ] = par_group_settings
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
@@ -253,6 +263,14 @@ class PestSolver(BaseSolver):
         
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[:, ["pargp"]] = self.par_sel.columns.to_list()
+
+        # apply provided parameter group settings (FORCEN, DERINC etc)
+        if self.par_group_settings is not None:
+            pst.rectify_pgroups()
+            for pargp, kw_val_dict in self.par_group_settings.items():
+                for pargp_kw, pargp_kw_value in kw_val_dict.items():
+                    pst.parameter_groups.loc[pargp, pargp_kw] = pargp_kw_value
+        
         pst.control_data.noptmax = self.noptmax  # optimization runs
         if self.control_data is not None:
             for key, value in self.control_data.items():
