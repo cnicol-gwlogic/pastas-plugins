@@ -537,7 +537,8 @@ class PestHpSolver(PestSolver):
         )
         par.index = self.ml.parameters.index[self.vary]
         optimal = self.ml.parameters["initial"].copy().values
-        optimal[self.vary] = par.iloc[:, 0].values
+        # load par * scale + offset --> pastas model par space
+        optimal[self.vary] = par.iloc[:, 0].values * par.iloc[:, 1].values + par.iloc[:, 2].values
 
         ofr = pd.read_csv(self.temp_ws / "pest.ofr", index_col=0, sep="\s+", skiprows=2)
         self.nfev = ofr.index[-1]
