@@ -92,6 +92,7 @@ class PestSolver(BaseSolver):
         long_names: bool = True,
         port_number: int = 4004,
         use_pypestworker: bool = True,
+        par_transform: str = "none",
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -118,6 +119,8 @@ class PestSolver(BaseSolver):
             The port number for communication. Default is 4004.
         use_pypestworker : bool, optional
             Whether to use the PyPestWorker for Python processing. Default is True.
+        par_transform : Literal["none","log"], optional
+            PEST parameter transformation. Default is "none".
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -146,6 +149,7 @@ class PestSolver(BaseSolver):
         self.use_pypestworker: bool = use_pypestworker
         self.run_function: Callable = run
         self.ppw_function: Callable = run_pypestworker
+        self.par_transform: Literal["none", "log"] = par_transform
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
@@ -199,7 +203,7 @@ class PestSolver(BaseSolver):
         """
         pst.write(self.pf.new_d / "pest.pst", version=version)
 
-    def setup_files(self, version: int = 2, transform="none"):
+    def setup_files(self, version: int = 2):
         """Setup PEST file structure for optimization
 
         Parameters
@@ -215,7 +219,7 @@ class PestSolver(BaseSolver):
             use_cols=self.par_sel.columns.to_list(),
             par_type="grid",
             par_style="direct",
-            transform=transform,
+            transform=self.par_transform,
             # pargp=self.par_sel.columns.to_list(),
             # par_name_base=self.par_sel.columns.to_list(), #[x.split("_")[0] for x in self.par_sel.columns],
             # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
@@ -245,20 +249,7 @@ class PestSolver(BaseSolver):
             self.vary, "pmax"
         ].values
 
-        # Add offset for default log transform (where needed - negative parlbnd).
-        # Generally a good idea to log transform, and parubnd of 0.0 (eg on WellModel_A) can cause issues with derinc.
-        # But for OD this did not help - was worse actually.
-        log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
-        par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
-        pst.parameter_data.loc[log_mask, ["offset"]] = par_offsets.values
-        pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]] = \
-                                         pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
-
-        # Check for 0.0 parubnd for no-transform pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
-        log_ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
-        pst.parameter_data.loc[log_ubnd0_mask, ["offset"]] = 0.1
-        pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
-                                         pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
+        pst = PestSolver.add_offsets(pst)
         
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[:, ["pargp"]] = self.par_sel.columns.to_list()
@@ -277,6 +268,10 @@ class PestSolver(BaseSolver):
         self.parameter_index = dict(
             zip(pst.parameter_data.index, self.ml.parameters[self.vary].index)
         )
+        # and for translating from pastas model parameter names to pest names
+        self.ml_parname_to_pst = dict(
+            zip(self.parameter_index.values(), self.parameter_index.keys())
+        )
         with (self.temp_ws / "parameter_index.json").open("w") as f:
             json.dump(obj=self.parameter_index, fp=f, default=str)
         self.observation_index = dict(
@@ -289,6 +284,23 @@ class PestSolver(BaseSolver):
         pyemu.os_utils.run(
             f"{self.exe_name.name} pest.pst{arg_str}", cwd=self.pf.new_d, verbose=silent
         )
+
+    @staticmethod
+    def add_offsets(pst):
+        # Add offset for default log transform (where needed - negative parlbnd).
+        # Generally a good idea to log transform, and parubnd of 0.0 (eg on WellModel_A) can cause issues with derinc.
+        log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
+        par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
+        pst.parameter_data.loc[log_mask, ["offset"]] = par_offsets.values
+        pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]] = \
+                                         pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
+
+        # Check for 0.0 parubnd for no-transform pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
+        log_ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
+        pst.parameter_data.loc[log_ubnd0_mask, ["offset"]] = 0.1
+        pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
+                                         pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
+        return pst
 
 
 class PestGlmSolver(PestSolver):
@@ -485,7 +497,7 @@ class PestHpSolver(PestSolver):
         copy_file(self.exe_agent, self.temp_ws)  # copy agent executable
 
     def solve(
-        self, silent: bool = False, par_transform: str = "none", **kwargs
+        self, silent: bool = False, **kwargs
     ) -> tuple[bool, NDArray[np.float64], NDArray[np.float64]]:
         """
         Solve the optimization problem using the pest_hp solver.
@@ -508,7 +520,7 @@ class PestHpSolver(PestSolver):
             The standard errors of the optimal parameters.
         """
         self.setup_model()
-        self.setup_files(version=1, transform=par_transform)
+        self.setup_files(version=1)
         # start consecutive thread for pest_hp and agent_hp excutable
         threads = [
             Thread(target=self.run, args=(f" /h :{self.port_number}", silent)),
@@ -637,7 +649,6 @@ class PestIesSolver(PestSolver):
         | None = None,
         pestpp_options: dict[str, Any] | None = None,
         silent: bool = False,
-        par_transform: str = "none",
     ) -> None:
         """
         Run ensemble simulations using pestpp-ies.
@@ -665,7 +676,7 @@ class PestIesSolver(PestSolver):
         None
         """
         self.setup_model()
-        self.setup_files(transform=par_transform)
+        self.setup_files()
 
         # change ies_num_reals
         pst = pyemu.Pst(str(self.temp_ws / "pest.pst"))
@@ -694,21 +705,8 @@ class PestIesSolver(PestSolver):
 
         # add a user-provided pcov (eg from an initial leastsquares solve)
         if self.pcov is not None:
-            ies_pcov = self.pcov.copy()
-            ml_parname_to_pst = dict(zip(self.parameter_index.values(), self.parameter_index.keys()))
-            ies_pcov.index = [
-                ml_parname_to_pst[p] for p in ies_pcov.index
-                ]
-            ies_pcov.columns = [
-                ml_parname_to_pst[p] for p in ies_pcov.columns
-                ]
-            ies_pcov = pyemu.Cov(x=ies_pcov.values,names=ies_pcov.columns)
-            ies_pcov.to_ascii(self.model_ws / "pest.prior_parcov.mat")
-            ies_pcov.to_uncfile(self.model_ws / "pest.prior.unc", covmat_file="pest.prior_parcov.mat")
-            pst.pestpp_options["parcov"] = (
-                "pest.prior.unc"
-            )
-        
+            pst = self.parcov_to_uncfile(pst)
+            
         pestpp_options = {} if pestpp_options is None else pestpp_options
         pst.pestpp_options.update(pestpp_options)
 
@@ -740,6 +738,42 @@ class PestIesSolver(PestSolver):
             self.obj_func = phidf.at[
                 self.nfev, "base"
             ]  # could also get mean of all ensembles?
+
+    def parcov_to_uncfile(
+        self,
+        pst : pyemu.Pst,
+        ) -> pyemu.Pst:
+        """
+        Modify a Pst control file object to include a ++parcov() keyword pointing to a .unc file
+        containing a .mat file representation of the pcov dataframe provided to the solver.
+
+        Parameters:
+        -----------
+        pst : pyemu.Pst object
+            The Pst control file object to be modified to include a parcov via an input uncfile.
+
+        Returns:
+        --------
+        pyemu.Pst
+            Modified PEST control file object pointing to provided pcov.
+        """        
+        ies_pcov = self.pcov.copy()
+        # rename parcov parameter names to pest names (from pastas model parameter names)
+        ies_pcov.index = [
+            self.ml_parname_to_pst[p] for p in ies_pcov.index
+            ]
+        ies_pcov.columns = [
+            self.ml_parname_to_pst[p] for p in ies_pcov.columns
+            ]
+        # convert dataframe to pyemu.Cov object and write to disk, along with a .unc file pointing to it.
+        ies_pcov = pyemu.Cov(x=ies_pcov.values,names=ies_pcov.columns)
+        ies_pcov.to_ascii(self.model_ws / "pest.prior_parcov.mat")
+        ies_pcov.to_uncfile(self.model_ws / "pest.prior.unc", covmat_file="pest.prior_parcov.mat")
+        # update pst file to read the parcov matrix for prior definition and parameter sampling.
+        pst.pestpp_options["parcov"] = (
+            "pest.prior.unc"
+        )
+        return pst
 
     @staticmethod
     def parameter_distribution(
