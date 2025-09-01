@@ -337,31 +337,39 @@ class PestSolver(BaseSolver):
                                          pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
 
         # Check for 0.0 parubnd for no-transform pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
-        log_ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
-        pst.parameter_data.loc[log_ubnd0_mask, ["offset"]] = 0.1
-        pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
-                                         pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
+        ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
+        pst.parameter_data.loc[ubnd0_mask, ["offset"]] = 0.1
+        pst.parameter_data.loc[ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
+                                         pst.parameter_data.loc[ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
         return pst
 
     @staticmethod
     def posterior_pcov_from_jco(
         jco_file : str,
+        **kwargs,
         ) -> pyemu.Cov:
         """
-        Obtain the posterior parameter covariance matric for pst file corresponding to jco_file
+        Obtain the posterior parameter covariance matrix for pst file corresponding to jco_file
 
         Parameters
         ----------
         jco_file : str 
             Filepath to Jacobian matrix from a PEST calibration exercise.
+        **kwargs : dict
+            Additional keyword arguments passed to pyemu.Schur            
 
         Returns
         -------
         post_pcov : pyemu.Cov
             Posterior parameter ensemble for pst file corresponding to jco_file
-        """                
-        schur = pyemu.Schur(jco=jco_file)
-        post_pcov = sc.posterior_parameter
+        """
+        if "scale_offset" not in kwargs.keys():
+            # The prior must be constructed from offset par space for log-transformed pars, otherwise we will get nans in the prior covmat.
+            # Because pyemu.Schur's prior is constructed from par bounds (unless the prior parcov is user-provided),
+            # PestSolver is likely to have applied par offsets for non-zero log transformed pars and/or zero value parubnds.
+            kwargs["scale_offset"] = False 
+        schur = pyemu.Schur(jco=jco_file, **kwargs)
+        post_pcov = schur.posterior_parameter
         return post_pcov
 
 
