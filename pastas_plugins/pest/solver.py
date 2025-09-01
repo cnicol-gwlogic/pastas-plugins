@@ -95,7 +95,8 @@ class PestSolver(BaseSolver):
         par_transform: Literal["none","log"] = "log",
         par_group_settings: dict[
             str, dict[str, Any]
-            ] | None = None,        
+            ] | None = None,
+        add_tikhonov_reg: bool = False,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -128,6 +129,9 @@ class PestSolver(BaseSolver):
             Parameter group settings. Outer dict keyed by pargp. Inner dict keys
             are pest setting keywords. Inner dict values are pest parameter group
             values for the given keyword. Default is None.
+        add_tikhonov_reg : bool, optional
+            Whether to apply preferred-value regularisation in the pest control file.
+            Default is False.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -160,6 +164,7 @@ class PestSolver(BaseSolver):
         self.par_group_settings: dict[
             str, dict[str, Any]
             ] = par_group_settings
+        self.add_tikhonov_reg: bool = add_tikhonov_reg
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
@@ -280,6 +285,11 @@ class PestSolver(BaseSolver):
                     )
                 else:
                     setattr(pst.control_data, key, value)
+
+        # add tikhonov regularisation
+        if self.add_tikhonov_reg:
+            pyemu.helpers.zero_order_tikhonov(pst)
+        
         self.write_pst(pst=pst, version=version)
 
         # save parameter and observation index for going back and forth between pastas and pest names
@@ -315,6 +325,10 @@ class PestSolver(BaseSolver):
         ----------
         pst : pyemu.Pst
             Pyemu pest control file object.
+
+        Returns
+        -------
+        Modified pyemu.Pst with parameter offsets applied
         """        
         log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
         par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
@@ -328,6 +342,27 @@ class PestSolver(BaseSolver):
         pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
                                          pst.parameter_data.loc[log_ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
         return pst
+
+    @staticmethod
+    def posterior_pcov_from_jco(
+        jco_file : str,
+        ) -> pyemu.Cov:
+        """
+        Obtain the posterior parameter covariance matric for pst file corresponding to jco_file
+
+        Parameters
+        ----------
+        jco_file : str 
+            Filepath to Jacobian matrix from a PEST calibration exercise.
+
+        Returns
+        -------
+        post_pcov : pyemu.Cov
+            Posterior parameter ensemble for pst file corresponding to jco_file
+        """                
+        schur = pyemu.Schur(jco=jco_file)
+        post_pcov = sc.posterior_parameter
+        return post_pcov
 
 
 class PestGlmSolver(PestSolver):
