@@ -92,7 +92,7 @@ class PestSolver(BaseSolver):
         long_names: bool = True,
         port_number: int = 4004,
         use_pypestworker: bool = True,
-        par_transform: str = "none",
+        par_transform: Literal["none","log"] = "log",
         par_group_settings: dict[
             str, dict[str, Any]
             ] | None = None,        
@@ -123,7 +123,7 @@ class PestSolver(BaseSolver):
         use_pypestworker : bool, optional
             Whether to use the PyPestWorker for Python processing. Default is True.
         par_transform : Literal["none","log"], optional
-            PEST parameter transformation. Default is "none".
+            PEST parameter transformation. Default is "log".
         par_group_settings : dict[str, dict[str, Any]]
             Parameter group settings. Outer dict keyed by pargp. Inner dict keys
             are pest setting keywords. Inner dict values are pest parameter group
