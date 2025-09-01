@@ -468,11 +468,14 @@ class PestHpSolver(PestSolver):
         exe_agent: str | Path = "agent_hp",
         model_ws: str | Path = Path("model"),
         temp_ws: str | Path = Path("temp"),
+        master_ws: str | Path = Path("master"),        
         noptmax: int = 0,
         control_data: dict[str, Any] | None = None,
         pcov: DataFrame | None = None,
         nfev: int | None = None,
         port_number: int = 4004,
+        num_workers: int | None = None,
+        use_pypestworker: bool = True,
         **kwargs,
     ) -> None:
         """
@@ -488,6 +491,8 @@ class PestHpSolver(PestSolver):
             The model workspace directory for Pastas files. Default is "model".
         temp_ws : str | Path, optional
             The template workspace directory for PEST files. Default is "temp".
+        master_ws : str | Path, optional
+            The master working directory, by default Path("master").            
         noptmax : int, optional
             The maximum number of optimization iterations. Default is 0.
         control_data : dict[str, Any] | None, optional
@@ -498,6 +503,10 @@ class PestHpSolver(PestSolver):
             The number of function evaluations. Default is None.
         port_number : int, optional
             The port number for communication. Default is 4004.
+        num_workers : int | None, optional
+            The number of worker processes, by default the number of physical CPU cores.
+        use_pypestworker : bool, optional
+            Whether to use the PyPestWorker for Python processing. Default is True.            
         **kwargs : dict
             Additional keyword arguments passed to the PestSolver.
 
@@ -516,12 +525,16 @@ class PestHpSolver(PestSolver):
             noptmax=noptmax,
             control_data=control_data,
             port_number=port_number,
-            use_pypestworker=False,
+            use_pypestworker=use_pypestworker,
             **kwargs,
         )
+        self.master_ws = temp_ws if self.use_pypestworker else master_ws
         self.exe_agent = Path(exe_agent)
         self.computername = get_computername()
         copy_file(self.exe_agent, self.temp_ws)  # copy agent executable
+        self.num_workers = (
+            cpu_count(logical=False) if num_workers is None else num_workers
+        )        
 
     def solve(
         self, silent: bool = False, **kwargs
@@ -548,46 +561,41 @@ class PestHpSolver(PestSolver):
         """
         self.setup_model()
         self.setup_files(version=1)
-        # start consecutive thread for pest_hp and agent_hp excutable
-        threads = [
-            Thread(target=self.run, args=(f" /h :{self.port_number}", silent)),
-            Thread(target=self.run_agent, args=(silent,)),
-        ]
-        for t in threads:
-            t.start()
-            sleep(1.0)
-        for t in threads:
-            t.join()
+        pyemu.os_utils.start_workers(
+            worker_dir=self.temp_ws,  # the folder which contains the "template" PEST dataset
+            exe_rel_path=self.exe_name.name,  # the PEST software version we want to run
+            pst_rel_path="pest.pst",  # the control file to use with PEST
+            num_workers=self.num_workers,  # how many agents to deploy
+            worker_root=self.master_ws.parent,  # where to deploy the agent directories; relative to where python is running
+            master_dir=self.master_ws,  # the manager directory
+            port=self.port_number,  # the port to use for communication
+            verbose=silent,
+            silent_master=silent,
+            reuse_master=self.use_pypestworker,
+            ppw_function=self.ppw_function
+            if self.use_pypestworker
+            else None,  # the function to run in the agent
+            ppw_kwargs={"ml": self.ml}
+            if self.use_pypestworker
+            else {},  # the arguments to pass to the ppw_function
+            cleanup=False,
+        )        
 
         par = pd.read_csv(
-            self.temp_ws / "pest.par", index_col=0, sep="\s+", skiprows=[0], header=None
+            self.master_ws / "pest.par", index_col=0, sep="\s+", skiprows=[0], header=None
         )
         par.index = self.ml.parameters.index[self.vary]
         optimal = self.ml.parameters["initial"].copy().values
         # load par * scale + offset --> pastas model par space
         optimal[self.vary] = par.iloc[:, 0].values * par.iloc[:, 1].values + par.iloc[:, 2].values
 
-        ofr = pd.read_csv(self.temp_ws / "pest.ofr", index_col=0, sep="\s+", skiprows=2)
+        ofr = pd.read_csv(self.master_ws / "pest.ofr", index_col=0, sep="\s+", skiprows=2)
         self.nfev = ofr.index[-1]
         self.obj_func = ofr.at[self.nfev, "total"]
 
         # TODO: Obtain stderror from pest.hp output and covariance matrix
         stderr = np.full_like(optimal, np.nan)
         return True, optimal, stderr
-
-    def run_agent(self, silent: bool = False) -> None:
-        """
-        Executes the agent using the specified executable and configuration.
-        This method runs the agent with the given executable name, pest control file,
-        and host configuration (computer name and port number). The execution is done
-        in the directory specified by `self.pf.new_d`.
-        """
-
-        pyemu.os_utils.run(
-            f"{self.exe_agent.name} pest.pst /h {self.computername}:{self.port_number}",
-            cwd=self.pf.new_d,
-            verbose=silent,
-        )
 
 
 class PestIesSolver(PestSolver):
