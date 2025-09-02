@@ -17,12 +17,14 @@ from pandas import DataFrame
 from pastas import Model
 from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
+from parameterisers import BaseParameteriser
 from psutil import cpu_count
 from scipy.stats import norm, truncnorm
 
 logger = logging.getLogger(__name__)
 
-
+# TODO: change update_well_pars to custom parameteriser class stuff
+#run(update_well_pars={stressmodel_name: istresses})
 def run() -> None:
     # load packages
     from pathlib import Path
@@ -42,6 +44,14 @@ def run() -> None:
         pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
         ml.set_parameter(pname, optimal=val)
 
+    """TODO:
+    # update wellmodel parameters
+    if update_well_pars:
+        # read timeseries istress scaling pars - lets just make a full df for all istresses, with 1.0 for those not being changed
+
+        # need stressmodel name and istress to replace WellModel.stress list
+    """
+    
     # simulate
     simulation = ml.simulate()
     simulation.loc[ml.observations().index].to_csv(fpath / "simulation.csv")
@@ -97,6 +107,7 @@ class PestSolver(BaseSolver):
             str, dict[str, Any]
             ] | None = None,
         add_tikhonov_reg: bool = False,
+        stressmodel_parameterisers : list[BaseParameteriser] | None = None,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -132,6 +143,8 @@ class PestSolver(BaseSolver):
         add_tikhonov_reg : bool, optional
             Whether to apply preferred-value regularisation in the pest control file.
             Default is False.
+        stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.BaseParameteriser] | None, optional
+            Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST. Default is None.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -217,7 +230,7 @@ class PestSolver(BaseSolver):
             Version of the control file, by default version 2
         """
         pst.write(self.pf.new_d / "pest.pst", version=version)
-
+        
     def setup_files(self, version: int = 2):
         """Setup PEST file structure for optimization
 
@@ -227,7 +240,7 @@ class PestSolver(BaseSolver):
             Version of the control file, by default version 2
         """
 
-        # parameters
+        # standard pastas model parameters
         self.pf.add_parameters(
             self.model_ws / "parameters_sel.csv",
             index_cols=[self.par_sel.index.name],
@@ -242,7 +255,22 @@ class PestSolver(BaseSolver):
             # ult_lbound = self.ml.parameters.loc[self.vary, ["pmin"]].transpose().values.tolist(),
             # ult_ubound = self.ml.parameters.loc[self.vary, ["pmax"]].transpose().values.tolist(),
         )
-
+        
+        """ TODO: CHANGE THIS TO GENERIC CUSTOM PARAMETERISER CLASS/METHOD
+        WHICH GIVES US THE STANDARD REQUIREDMENTS for self.pf.add_parameters() (to be called here)
+        
+        # wellmodel rate scaling parameters
+        if wellmodel_istresses:
+            for sm_name, istresses in wellmodel_istresses.items():
+                wm = self.get_wellmodel(sm_name)
+                self.add_well_rate_scaling_parameters(
+                    wm,
+                    istresses,
+                    par_freq: str | None = None,
+                    t_variogram_range: float | None = None,
+                    t_variogram_sill: float = 1.0,
+                    )"""
+            
         # observations and simulation
         self.pf.add_observations(
             "simulation.csv",
@@ -311,12 +339,12 @@ class PestSolver(BaseSolver):
     def run(self, arg_str: str = "", silent: bool = False):
         pyemu.os_utils.run(
             f"{self.exe_name.name} pest.pst{arg_str}", cwd=self.pf.new_d, verbose=silent
-        )
-
+        )        
+        
     @staticmethod
     def add_offsets(pst) -> pyemu.Pst:
         """
-        Add offset for default log transform (where needed - negative parlbnd).
+        Add offset for default log transform (where needed - parlbnd <= 0).
         Generally a good idea to log transform.
         Check for 0.0 parubnd for transform==none pars and add an offset so
         derinc can be calc'd by PEST_HP when pars are at 0.0
@@ -330,22 +358,26 @@ class PestSolver(BaseSolver):
         -------
         Modified pyemu.Pst with parameter offsets applied
         """        
-        log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd < 0.0)
+        log_mask = (pst.parameter_data.partrans.str.lower() == "log") & (pst.parameter_data.parlbnd <= 0.0)
         par_offsets = pst.parameter_data.loc[log_mask].parlbnd - 0.1
         pst.parameter_data.loc[log_mask, ["offset"]] = par_offsets.values
-        pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]] = \
-                                         pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
+        pst.parameter_data.loc[
+            log_mask, ["parval1","parlbnd","parubnd"]
+            ] = pst.parameter_data.loc[log_mask, ["parval1","parlbnd","parubnd"]].add(par_offsets.abs(), axis=0).values
 
-        # Check for 0.0 parubnd for no-transform pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
-        ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & (pst.parameter_data.parubnd == 0.0)
+        # Check for 0.0 parbnd for untransformed pars and add an offset so derinc can be calc'd by PEST_HP when pars are at 0.0
+        ubnd0_mask = (pst.parameter_data.partrans.str.lower() == "none") & \
+                     (pst.parameter_data.loc[:,["parubnd","parlbnd"]] == 0.0).any(axis=1)
         pst.parameter_data.loc[ubnd0_mask, ["offset"]] = 0.1
-        pst.parameter_data.loc[ubnd0_mask, ["parval1","parlbnd","parubnd"]] = \
-                                         pst.parameter_data.loc[ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
+        pst.parameter_data.loc[
+            ubnd0_mask, ["parval1","parlbnd","parubnd"]
+            ] = pst.parameter_data.loc[ubnd0_mask, ["parval1","parlbnd","parubnd"]].sub(0.1).values
         return pst
 
-    @staticmethod
     def posterior_pcov_from_jco(
+        self,
         jco_file : str,
+        pastas_par_names : bool = True,
         **kwargs,
         ) -> pyemu.Cov:
         """
@@ -353,8 +385,10 @@ class PestSolver(BaseSolver):
 
         Parameters
         ----------
-        jco_file : str 
+        jco_file : str
             Filepath to Jacobian matrix from a PEST calibration exercise.
+        pastas_par_names : bool, optional
+            Whether to return pastas parameter names as row/col indices, or leave PEST par names as is (False). Default is True.
         **kwargs : dict
             Additional keyword arguments passed to pyemu.Schur            
 
@@ -366,13 +400,17 @@ class PestSolver(BaseSolver):
         if "scale_offset" not in kwargs.keys():
             # The prior must be constructed from offset par space for log-transformed pars, otherwise we will get nans in the prior covmat.
             # Because pyemu.Schur's prior is constructed from par bounds (unless the prior parcov is user-provided),
-            # PestSolver is likely to have applied par offsets for non-zero log transformed pars and/or zero value parubnds.
+            # PestSolver is likely to have applied par offsets for log transformed pars and/or zero value parbnds.
             kwargs["scale_offset"] = False 
         schur = pyemu.Schur(jco=jco_file, **kwargs)
-        post_pcov = schur.posterior_parameter
+        post_pcov = schur.posterior_parameter.df()
+        if pastas_par_names:
+            post_pcov.rename(index=self.parameter_index, columns=self.parameter_index, inplace=True)
+        if self.par_transform == "log":
+            logger.warning("Posterior PestSolver.pcov is based on log-transformed parameter space, because PestSolver.par_transform is \"log\"")
         return post_pcov
 
-
+    
 class PestGlmSolver(PestSolver):
     """PESTPP-GLM (Gauss-Levenberg-Marquardt) solver"""
 
@@ -571,6 +609,7 @@ class PestHpSolver(PestSolver):
             use_pypestworker=use_pypestworker,
             **kwargs,
         )
+        master_ws = Path(master_ws).resolve()
         self.master_ws = temp_ws if self.use_pypestworker else master_ws
         self.exe_agent = Path(exe_agent)
         self.computername = get_computername()
@@ -636,7 +675,10 @@ class PestHpSolver(PestSolver):
         self.nfev = ofr.index[-1]
         self.obj_func = ofr.at[self.nfev, "total"]
 
-        # TODO: Obtain stderror from pest.hp output and covariance matrix
+        # get posterior par cov
+        self.pcov = self.posterior_pcov_from_jco(str(self.master_ws / 'pest.jco'))
+        
+        # TODO: Obtain stderror from pest.hp output
         stderr = np.full_like(optimal, np.nan)
         return True, optimal, stderr
 
@@ -838,14 +880,9 @@ class PestIesSolver(PestSolver):
         """        
         ies_pcov = self.pcov.copy()
         # rename parcov parameter names to pest names (from pastas model parameter names)
-        ies_pcov.index = [
-            self.ml_parname_to_pst[p] for p in ies_pcov.index
-            ]
-        ies_pcov.columns = [
-            self.ml_parname_to_pst[p] for p in ies_pcov.columns
-            ]
+        ies_pcov.rename(index=self.ml_parname_to_pst, columns=self.ml_parname_to_pst, inplace=True)
 
-        # TODO: If PestSolver.par_transform=="log": Convert pcov from Pastas untransformed space to log space. Is this even possible?
+        # TODO: If PestSolver.par_transform=="log": Convert pcov from Pastas.Model.pcov untransformed space to log space. Is this even possible?
         #       Or modify Pastas.model.residuals / model.simulation to  allow log-transformation of parameters provided to LSQ.
         if self.par_transform == "log":
             logger.warning(
