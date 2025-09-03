@@ -58,9 +58,10 @@ def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
-    ml_file: str,
+    ml_dict: dict,
+    parameter_index: dict,
 ) -> None:
-    from pastas.io.base import load as load_model
+    from pastas.io.base import _load_model
 
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,
@@ -69,7 +70,7 @@ def run_pypestworker(
         verbose=False,
     )
     # load pastas model
-    ml = load_model(ml_file)
+    ml = _load_model(ml_dict)  # load_model(ml_file)
 
     pvals = ppw.get_parameters()
     if pvals is None:
@@ -77,8 +78,10 @@ def run_pypestworker(
 
     while True:
         for pname, val in pvals.items():
-            pname = pname.split(":")[-1] if ":" in pname else pname
-            pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
+            pname = parameter_index[pname]
+            # pname = pname.split(":")[-1] if ":" in pname else pname
+            # pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
+            # pname = pname.replace("wellmodel","WellModel")
             ml.set_parameter(pname, optimal=val)
         sim = ml.simulate()
         obsvals = sim.loc[ml.observations().index]
@@ -525,7 +528,10 @@ class PestGlmSolver(PestSolver):
                 master_dir=self.temp_ws,  # the manager directory
                 reuse_master=self.use_pypestworker,
                 ppw_function=self.ppw_function,
-                ppw_kwargs={"ml_file": self.temp_ws / "model.pas"},
+                ppw_kwargs={
+                    "ml_dict": self.ml.to_dict(),
+                    "parameter_index": self.parameter_index,
+                },
             )
         else:
             self.run()
@@ -675,7 +681,10 @@ class PestHpSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
+            ppw_kwargs={
+                "ml_dict": self.ml.to_dict(),
+                "parameter_index": self.parameter_index,
+            }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
             cleanup=False,
@@ -873,7 +882,10 @@ class PestIesSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
+            ppw_kwargs={
+                "ml_dict": self.ml.to_dict(),
+                "parameter_index": self.parameter_index,
+            }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
@@ -1454,7 +1466,10 @@ class PestSenSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
+            ppw_kwargs={
+                "ml_dict": self.ml.to_dict(),
+                "parameter_index": self.parameter_index,
+            }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
