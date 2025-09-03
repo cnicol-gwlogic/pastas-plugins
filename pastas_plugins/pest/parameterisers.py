@@ -2,7 +2,7 @@ import sys
 from abc import ABC, abstractmethod
 from logging import getLogger
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -38,6 +38,8 @@ class BaseParameteriser(ABC):
         Name of StressModel for which to apply StressModel.stress rate parameters to via PEST.
     date_format : Optional[str]
         Datetime format for saving PEST model parameter input files for stressmodel. Default is \"%d/%m/%Y %H:%M:%S\".
+    interp_kwargs : Optional[dict[str, Any]]
+        kwargs to pass to BaseParameteriser.interpolate_stresses(). Default is {}.
 
     Attributes
     ----------
@@ -67,11 +69,13 @@ class BaseParameteriser(ABC):
         model: Model,
         stressmodel_name: str,
         date_format: Optional[str] = "%d/%m/%Y %H:%M:%S",
+        interp_kwargs: Optional[dict[str, Any]] = {},
     ) -> None:
         self.model = model
         self.stressmodel_name = stressmodel_name
         self.stressmodel = self._validate_stressmodel_name(sname=stressmodel_name)
         self.date_format = date_format
+        self.interp_kwargs = interp_kwargs
 
         # PestSolver related things.
         # These are designed to be populated on 'BaseParameteriser.solver = solver' calls from within the PestSolver.
@@ -392,7 +396,7 @@ class WellModelParameteriser(BaseParameteriser):
         self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
         self.t_variogram_sill = t_variogram_sill
 
-    def add_stress_parameters(self, par_name_base: str):
+    def add_stress_parameters(self, par_name_base: str) -> None:
         """
         Add WellModel pumping rate parameters for PestSolver.model.pf (pyemu.PstFrom) for each WellModel stress TimeSeries.
         Modifies the solver.pf (pyemu.PstFrom) object in-place on calling this function.
@@ -427,6 +431,7 @@ class WellModelParameteriser(BaseParameteriser):
         # TODO: DEFINE/HANDLE RATE PAR BOUNDS
 
         # TODO: check par_name_base is not already in self.solver.pf - error if it is
+        # (if pyemu.PstFrom.add_parameters() doesn't deal with incrementing par names/indices.)
 
         if self.par_freq is None:
             # constant-in-time scaling parameter applied

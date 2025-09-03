@@ -5,15 +5,15 @@ from functools import lru_cache
 from pathlib import Path
 from platform import node as get_computername
 from shutil import copy as copy_file
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
 import pyemu
 from numpy.typing import NDArray
 from pandas import DataFrame
-from parameterisers import BaseParameteriser
-from pastas import Model
+
+# from pastas_plugins.pest.parameterisers import BaseParameteriser
 from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
 from psutil import cpu_count
@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 # TODO: change update_well_pars to custom parameteriser class stuff
 # run(update_well_pars={stressmodel_name: istresses})
-def run() -> None:
+def run(
+    stressmodel_parameterisers: list = [],
+) -> None:
     # load packages
     from pathlib import Path
 
@@ -37,19 +39,15 @@ def run() -> None:
     # load pastas model
     ml = load_model(fpath / "model.pas")
 
-    # update model parameters
+    # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
     for pname, val in parameters.loc[:, "optimal"].items():
         pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
         ml.set_parameter(pname, optimal=val)
 
-    """TODO:
-    # update wellmodel parameters
-    if update_well_pars:
-        # read timeseries istress scaling pars - lets just make a full df for all istresses, with 1.0 for those not being changed
-
-        # need stressmodel name and istress to replace WellModel.stress list
-    """
+    # update custom stressmodel parameters
+    for sm_p in stressmodel_parameterisers:
+        sm_p.interpolate_stresses(**sm_p.interp_kwargs)
 
     # simulate
     simulation = ml.simulate()
@@ -60,14 +58,19 @@ def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
-    ml: Model,
+    ml_file: str,
 ) -> None:
+    from pastas.io.base import load as load_model
+
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,
         host=host,
         port=port,
         verbose=False,
     )
+    # load pastas model
+    ml = load_model(ml_file)
+
     pvals = ppw.get_parameters()
     if pvals is None:
         return None
@@ -92,19 +95,19 @@ class PestSolver(BaseSolver):
     def __init__(
         self,
         exe_name: str | Path,
-        model_ws: str | Path = Path("model"),
-        temp_ws: str | Path = Path("temp"),
-        noptmax: int = 0,
-        control_data: dict[str, Any] | None = None,
-        pcov: DataFrame | None = None,
-        nfev: int | None = None,
-        long_names: bool = True,
-        port_number: int = 4004,
-        use_pypestworker: bool = True,
-        par_transform: Literal["none", "log"] = "log",
-        par_group_settings: dict[str, dict[str, Any]] | None = None,
-        add_tikhonov_reg: bool = False,
-        stressmodel_parameterisers: list[BaseParameteriser] | None = None,
+        model_ws: Optional[str | Path] = Path("model"),
+        temp_ws: Optional[str | Path] = Path("temp"),
+        noptmax: Optional[int] = 0,
+        control_data: Optional[dict[str, Any] | None] = None,
+        pcov: Optional[DataFrame | None] = None,
+        nfev: Optional[int | None] = None,
+        long_names: Optional[bool] = True,
+        port_number: Optional[int] = 4004,
+        use_pypestworker: Optional[bool] = True,
+        par_transform: Optional[Literal["none", "log"]] = "log",
+        par_group_settings: Optional[dict[str, dict[str, Any]] | None] = None,
+        add_tikhonov_reg: Optional[bool] = False,
+        stressmodel_parameterisers: Optional[list | None] = None,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -173,6 +176,17 @@ class PestSolver(BaseSolver):
         self.par_transform: Literal["none", "log"] = par_transform
         self.par_group_settings: dict[str, dict[str, Any]] = par_group_settings
         self.add_tikhonov_reg: bool = add_tikhonov_reg
+        self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
+
+    @property
+    def stressmodel_parameterisers(self) -> list:
+        """Property for getting stressmodel_parameterisers"""
+        return self._stressmodel_parameterisers
+
+    @stressmodel_parameterisers.setter
+    def stressmodel_parameterisers(self, stressmodel_parameterisers) -> None:
+        """Setter for setting stressmodel_parameterisers"""
+        self._stressmodel_parameterisers = stressmodel_parameterisers
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
@@ -251,20 +265,14 @@ class PestSolver(BaseSolver):
             # ult_ubound = self.ml.parameters.loc[self.vary, ["pmax"]].transpose().values.tolist(),
         )
 
-        """ TODO: CHANGE THIS TO GENERIC CUSTOM PARAMETERISER CLASS/METHOD
-        WHICH GIVES US THE STANDARD REQUIREDMENTS for self.pf.add_parameters() (to be called here)
-        
-        # wellmodel rate scaling parameters
-        if wellmodel_istresses:
-            for sm_name, istresses in wellmodel_istresses.items():
-                wm = self.get_wellmodel(sm_name)
-                self.add_well_rate_scaling_parameters(
-                    wm,
-                    istresses,
-                    par_freq: str | None = None,
-                    t_variogram_range: float | None = None,
-                    t_variogram_sill: float = 1.0,
-                    )"""
+        # add custom stressmodel parameters
+        if self.stressmodel_parameterisers:
+            self.pf.extra_py_imports += ["from parameterisers import BaseParameteriser"]
+            for sm_p in self.stressmodel_parameterisers:
+                sm_p.solver = self
+                # may need to customise par_name_base per sm_p depending on how (if)
+                # pyemu.PstFrom.add_parameters() deals with incrementing par names/indices.
+                sm_p.add_stress_parameters(par_name_base="sm")
 
         # observations and simulation
         self.pf.add_observations(
@@ -274,8 +282,12 @@ class PestSolver(BaseSolver):
         )
 
         # python scripts to run
-        self.pf.add_py_function(self.run_function, "run()", is_pre_cmd=None)
-        self.pf.mod_py_cmds.append("run()")
+        self.pf.add_py_function(
+            self.run_function, "run()", is_pre_cmd=None
+        )  # TODO: check if we need the new parameteriser argument for this now
+        self.pf.mod_py_cmds.append(
+            "run()"
+        )  # TODO: check if we need the new parameteriser argument for this now
 
         # create control file
         pst = self.pf.build_pst(self.pf.new_d / "pest.pst", version=version)
@@ -287,7 +299,7 @@ class PestSolver(BaseSolver):
             self.vary, "pmax"
         ].values
 
-        pst = super().add_offsets(pst)
+        pst = PestSolver.add_offsets(pst)
 
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[:, ["pargp"]] = self.par_sel.columns.to_list()
@@ -463,7 +475,7 @@ class PestGlmSolver(PestSolver):
         -------
         None
         """
-        super().__init__(
+        PestSolver.__init__(
             self,
             exe_name=exe_name,
             model_ws=model_ws,
@@ -513,7 +525,7 @@ class PestGlmSolver(PestSolver):
                 master_dir=self.temp_ws,  # the manager directory
                 reuse_master=self.use_pypestworker,
                 ppw_function=self.ppw_function,
-                ppw_kwargs={"ml": self.ml},
+                ppw_kwargs={"ml_file": self.temp_ws / "model.pas"},
             )
         else:
             self.run()
@@ -601,7 +613,7 @@ class PestHpSolver(PestSolver):
         -------
         None
         """
-        super().__init__(
+        PestSolver.__init__(
             self,
             exe_name=exe_name,
             model_ws=model_ws,
@@ -663,7 +675,7 @@ class PestHpSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml": self.ml}
+            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
             cleanup=False,
@@ -754,7 +766,7 @@ class PestIesSolver(PestSolver):
         None
         """
 
-        super().__init__(
+        PestSolver.__init__(
             self,
             exe_name=exe_name,
             model_ws=model_ws,
@@ -861,10 +873,9 @@ class PestIesSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml": self.ml}
+            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
-            cleanup=False,
         )
 
         phidf = pd.read_csv(self.master_ws / "pest.phi.meas.csv", index_col=0)
@@ -1382,7 +1393,7 @@ class PestSenSolver(PestSolver):
         -------
         None
         """
-        super().__init__(
+        PestSolver.__init__(
             self,
             exe_name=exe_name,
             model_ws=model_ws,
@@ -1443,7 +1454,7 @@ class PestSenSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={"ml": self.ml}
+            ppw_kwargs={"ml_file": self.temp_ws / "model.pas"}
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
