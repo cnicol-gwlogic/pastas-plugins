@@ -73,7 +73,7 @@ class BaseParameteriser(ABC):
         self,
         model: Model,
         stressmodel_name: str,
-        date_format: Optional[str] = "%d/%m/%Y %H:%M:%S",
+        date_format: Optional[str] = "%d/%m/%Y",
         interp_kwargs: Optional[dict[str, Any]] = {},
     ) -> None:
         self.model = model
@@ -461,8 +461,14 @@ class WellModelParameteriser(BaseParameteriser):
 
     Parameters
     ----------
+    model : pastas.Model
+        Pastas model.
     wellmodel_name : str
         WellModel.name for which to apply WellModel.stress rate parameters to. Must refer to a WellModel object.
+    date_format : Optional[str]
+        Datetime format for saving PEST model parameter input files for stressmodel. Default is \"%d/%m/%Y\".
+    interp_kwargs : Optional[dict[str, Any]]
+        kwargs to pass to BaseParameteriser.interpolate_stresses(). Default is {}.
     stress_names : list[str] | None, optional
         List of WellModel.stress.TimeSeries names for which stress rate parameters are to be optimised.
         If None, all stresses in the wellmodel are parameterised. Default is None.
@@ -501,13 +507,22 @@ class WellModelParameteriser(BaseParameteriser):
 
     def __init__(
         self,
+        model: Model,
         wellmodel_name: str,
+        date_format: Optional[str] = "%d/%m/%Y",
+        interp_kwargs: Optional[dict[str, Any]] = {},
         stress_names: list[str] | None = None,
         par_freq: str | None = None,
         t_variogram_range_freq_factor: float | None = None,
         t_variogram_sill: float = 1.0,
     ) -> None:
-        super().__init__(self, stressmodel=wellmodel_name)
+        super().__init__(
+            self,
+            model=model,
+            stressmodel=wellmodel_name,
+            date_format=date_format,
+            interp_kwargs=interp_kwargs,
+        )
 
         if (
             stress_names is not None
@@ -559,7 +574,7 @@ class WellModelParameteriser(BaseParameteriser):
 
         if self.par_freq is None:
             # constant-in-time scaling parameter applied
-            self.stress.iloc[0, :].to_csv(self.modelfile, date_format="%d/%m/%Y")
+            self.stress.iloc[0, :].to_csv(self.modelfile, date_format=self.date_format)
             self.stress_pars = self.solver.pf.add_parameters(
                 self.modelfile,
                 index_cols=[self.stress.index.name],
@@ -618,7 +633,7 @@ class WellModelParameteriser(BaseParameteriser):
                 source_points=source_points,
                 target_points=target_points,
             )
-            stress_pars.to_csv(self.modelfile, date_format="%d/%m/%Y")
+            stress_pars.to_csv(self.modelfile, date_format=self.date_format)
             self.stress_pars = self.solver.pf.add_parameters(
                 self.modelfile,
                 index_cols=[stress_pars.index.name],
@@ -644,7 +659,7 @@ class WellModelParameteriser(BaseParameteriser):
             )
             # and save a copy of self.modelfile data in memory for pypestworker updates
             self.modelfile_df_org = pd.read_csv(
-                self.modelfile, index_col=0, date_format="%d/%m/%Y"
+                self.modelfile, index_col=0, date_format=self.date_format
             )
             """
             # define a covariance matrix called cov using pyemu's geostatistics capabilities
