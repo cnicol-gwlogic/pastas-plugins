@@ -12,8 +12,6 @@ import pandas as pd
 import pyemu
 from numpy.typing import NDArray
 from pandas import DataFrame
-
-# from pastas_plugins.pest.parameterisers import BaseParameteriser
 from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
 from psutil import cpu_count

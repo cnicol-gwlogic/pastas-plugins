@@ -5,10 +5,17 @@ import pyemu
 # run(update_well_pars={stressmodel_name: istresses})
 def run() -> None:
     # load packages
+    import glob
+    import pickle
     from pathlib import Path
 
     from pandas import read_csv
     from pastas.io.base import load as load_model
+
+    from pastas_plugins.pest.parameterisers.py import (  # noqa: F401
+        BaseParameteriser,
+        WellModelParameteriser,
+    )
 
     # base path
     fpath = Path(__file__).parent
@@ -21,6 +28,16 @@ def run() -> None:
     for pname, val in parameters.loc[:, "optimal"].items():
         pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
         ml.set_parameter(pname, optimal=val)
+    # update custom stressmodel parameters
+    pickles = glob.glob(fpath / "*.parameteriser.pkl")
+    stressmodel_parameterisers = [pickle.load(open(sm_p, "rb")) for sm_p in pickles]
+    for sm_p in stressmodel_parameterisers:
+        # get df of updated (parameterised and interpolated) stress TimeSeries for model
+        updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
+        # update stress TimeSeries
+        smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+        for stress_series in smodel.stress:
+            stress_series.series_original = updated_stress_df.loc[:, stress_series.name]
 
     # simulate
     simulation = ml.simulate()
@@ -36,6 +53,11 @@ def run_pypestworker(
     stressmodel_parameterisers: list = [],
 ) -> None:
     from pastas.io.base import _load_model
+
+    from pastas_plugins.pest.parameterisers.py import (  # noqa: F401
+        BaseParameteriser,
+        WellModelParameteriser,
+    )
 
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,

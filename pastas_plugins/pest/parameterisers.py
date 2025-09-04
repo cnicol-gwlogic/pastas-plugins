@@ -1,3 +1,5 @@
+import os
+import pickle
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -651,3 +653,7 @@ class WellModelParameteriser(BaseParameteriser):
             # using the covariance for regularization weight
             pyemu.helpers.first_order_pearson_tikhonov(pst, cov, reset=False)
             """
+
+            # finally, pickle to disk for pest workers
+            with open(f"{self.stressmodel.name}.parameteriser.pkl", "wb") as f:
+                pickle.dump(self, os.path.join(self.solver.temp_ws, f))
