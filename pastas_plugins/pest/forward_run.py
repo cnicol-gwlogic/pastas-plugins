@@ -54,15 +54,20 @@ def run_pypestworker(
         # update standard pastas model parameters
         for pname, val in pvals.items():
             pname = parameter_index[pname]
-            ml.set_parameter(pname, optimal=val)
+            if pname in ml.parameters.keys():
+                ml.set_parameter(pname, optimal=val)
         # update custom stressmodel parameters
         for sm_p in stressmodel_parameterisers:
+            sm_p_parnames = sm_p.stress_pars.parnme
+            new_par_values = pvals.loc[sm_p_parnames].values
             # get df of updated (parameterised and interpolated) stress TimeSeries for model
-            updated_stress_ts = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
+            interp_kwargs = sm_p.interp_kwargs
+            interp_kwargs["updated_sourcevals"] = new_par_values
+            updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
             # update stress TimeSeries
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
             for stress_series in smodel.stress:
-                stress_series.series_original = updated_stress_ts.loc[
+                stress_series.series_original = updated_stress_df.loc[
                     :, stress_series.name
                 ]
 

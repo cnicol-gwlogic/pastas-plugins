@@ -10,7 +10,6 @@ from typing import Any, Literal, Optional
 import numpy as np
 import pandas as pd
 import pyemu
-from forward_run import run, run_pypestworker
 from numpy.typing import NDArray
 from pandas import DataFrame
 
@@ -19,6 +18,8 @@ from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
 from psutil import cpu_count
 from scipy.stats import norm, truncnorm
+
+from pastas_plugins.pest.forward_run import run, run_pypestworker
 
 logger = logging.getLogger(__name__)
 

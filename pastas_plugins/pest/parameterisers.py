@@ -46,6 +46,8 @@ class BaseParameteriser(ABC):
     ----------
     modelfile : Path
         PestSolver model input file for scaling (optimising) stressmodel stresses during PEST runs.
+    modelfile_df_org : DataFrame
+        DataFrame of original PestSolver model input file for scaling (optimising) stressmodel stresses during PEST runs.
     stress : DataFrame | Series
         Stressmodel stress TimeSeries.  Series if a single stress, DataFrame if multiple (eg WellModel)
     krig_factorfile : Path
@@ -83,6 +85,7 @@ class BaseParameteriser(ABC):
         self._solver = None
         self.model_ws = None
         self.modelfile = None
+        self.modelfile_df_org = None
 
         # Stress TimeSeries
         self.stress = (
@@ -313,6 +316,7 @@ class BaseParameteriser(ABC):
         targval_max: Optional[float] = 1.0e16,
         invpow=2.0,
         method: Literal["inv_dist_weighted", "step", "kriging"] = "inv_dist_weighted",
+        updated_sourcevals: Optional[Series | None] = None,
     ) -> None:
         """
         Class method for PestSolver.run() to interpolate stress pilot point interpolation
@@ -323,7 +327,8 @@ class BaseParameteriser(ABC):
         Parameters
         ----------
         targval_min : Optional[float]
-            Interpolation output minimum allowed value. Default is 0.0.
+            Interpolation output minimum allowed value. Default is 0.0, on the assumption that pastas is
+            using positive abstraction rates.
         targval_max : Optional[float]
             Interpolation output maximum allowed value. Default is 1.0e+16.
         method : Literal["inv_dist_weighted","step","kriging"]
@@ -331,15 +336,50 @@ class BaseParameteriser(ABC):
             between the temporal pilot point parameter values, resulting in stepped stress rates.
             Kriging results in a smoothed interpolation between the pilot points. If only a single
             parameter is defined per stress, then step interpolation is also used. Default is \"kriging\".
+        updated_sourcevals: Optional[Series | None],
+            Optional Series (indexed by PEST parnme) of interpolation pilot point source values per PEST
+            parnme for this WellModelParameteriser instance. Provided by a PyPestWorker instance for example.
+            If None, then (x)Parameteriser.modelfile is read to obtain these values. Default is None.
 
         Returns
         -------
         updated_source_stresses : DataFrame | Series
-            Stressmodel stress TimeSeries.  Series if a single stress, DataFrame if multiple (eg WellModel)
+            Stressmodel stress TimeSeries. Series if a single stress, DataFrame if multiple (eg WellModel)
         """
-        sourcevals = pd.read_csv(
-            self.modelfile, index_col=0, parse_dates=[0], date_format=self.date_format
-        )  # one col per stress. Need to krig or step interp each for which we have adjustable parameters.
+        if not updated_sourcevals:  # non-pypestworker call (worker dirs on disk)
+            sourcevals = pd.read_csv(
+                self.modelfile,
+                index_col=0,
+                parse_dates=[0],
+                date_format=self.date_format,
+            )  # one col per stress. Need to krig or step interp each for which we have adjustable parameters.
+        else:  # pypestworker call
+            if not self.solver.longnames:
+                raise Exception(
+                    f"PestSolver.longnames must be True for {self._name}.interpolate_stress.updated_)sourcevals to work as currently coded.\n \
+                                Hence Pest_HP solver is not yet supported with this function."
+                )
+            sourcevals = self.modelfile_df_org.copy()
+            # self.stress_pars (returned pstfrom() df) has usecol and parnme in it? We could use that (better than reading from disk).
+            usecols = self.stress_pars.parnme.split("_usecol:")[-1].split("_pstyle:")[0]
+            indices = pd.to_datetime(
+                self.stress_pars.parnme.split("_pstyle:d_datetime:")[-1],
+                format="%d/%m/%Y",
+            )
+            parnme_indexer = pd.DataFrame(
+                pd.concat([indices, usecols], axis=1),
+                index=self.stress_pars.parnme,
+                names=["indices", "column_names"],
+            )
+            # the above willnot work for pest_hp solves as can't use pyemu longnames. Hence exception above.
+            # TODO: Need a way of getting from shortnames to usecols (need to mod pyemu.PstFrom to spit the usecol name out? Would be very handy)
+            # Also really would be easiest/safest if original file index value was included.
+            for krig_col in sourcevals.columns:
+                parnames = self.stress_pars.loc[usecols == krig_col].parnme
+                usecols = parnme_indexer.loc[parnames].columns_names
+                indexer = parnme_indexer.loc[parnames].indices
+                sourcevals.loc[indexer, usecols] = updated_sourcevals.loc[parnames]
+
         krig_cols = self.stress_names
         source_stresses = self.stress.copy()
 
@@ -387,6 +427,7 @@ class BaseParameteriser(ABC):
                 )
                 func = pputils.ipd_interpolate_2d
 
+            source_stresses.loc[:, krig_cols] = np.nan
             for krig_col in krig_cols:
                 targval = self._interpolate(
                     func,
@@ -396,6 +437,10 @@ class BaseParameteriser(ABC):
                     kwargs_pputils=kwargs_pputils,
                 )
                 source_stresses.loc[self.stress.index, krig_col] = targval
+                # fill nans by bfill/ffill, just in case.
+                source_stresses.loc[:, krig_col] = (
+                    source_stresses.loc[:, krig_col].ffill().bfill()
+                )
 
             updated_source_stresses = source_stresses
 
@@ -512,7 +557,7 @@ class WellModelParameteriser(BaseParameteriser):
 
         if self.par_freq is None:
             # constant-in-time scaling parameter applied
-            self.stress.iloc[0, :].to_csv(self.modelfile)
+            self.stress.iloc[0, :].to_csv(self.modelfile, date_format="%d/%m/%Y")
             self.stress_pars = self.solver.pf.add_parameters(
                 self.modelfile,
                 index_cols=[self.stress.index.name],
@@ -571,7 +616,7 @@ class WellModelParameteriser(BaseParameteriser):
                 source_points=source_points,
                 target_points=target_points,
             )
-            stress_pars.to_csv(self.modelfile)
+            stress_pars.to_csv(self.modelfile, date_format="%d/%m/%Y")
             self.stress_pars = self.solver.pf.add_parameters(
                 self.modelfile,
                 index_cols=[stress_pars.index.name],
@@ -583,7 +628,10 @@ class WellModelParameteriser(BaseParameteriser):
                     f"wellq.{self.stressmodel.name}{str(idx).zfill(2)}"
                     for idx, col in enumerate(stress_pars.columns)
                 ],
-                par_name_base=par_name_base,
+                par_name_base=[
+                    f"{par_name_base}.{str(idx).zfill(2)}"
+                    for idx, col in enumerate(stress_pars.columns)
+                ],
                 # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
                 # upper_bound=self.ml.parameters.loc[self.vary, "pmax"].values.tolist(),
                 # ult_lbound = self.ml.parameters.loc[self.vary, ["pmin"]].transpose().values.tolist(),
@@ -591,6 +639,10 @@ class WellModelParameteriser(BaseParameteriser):
             )
             self.stress_parcov = Cov(
                 x=stress_parcov, names=self.stress_pars.index, isdiagonal=False
+            )
+            # and save a copy of self.modelfile data in memory for pypestworker updates
+            self.modelfile_df_org = pd.read_csv(
+                self.modelfile, index_col=0, date_format="%d/%m/%Y"
             )
             """
             # define a covariance matrix called cov using pyemu's geostatistics capabilities
