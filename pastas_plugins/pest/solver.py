@@ -10,6 +10,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 import pandas as pd
 import pyemu
+from forward_run import run, run_pypestworker
 from numpy.typing import NDArray
 from pandas import DataFrame
 
@@ -20,76 +21,6 @@ from psutil import cpu_count
 from scipy.stats import norm, truncnorm
 
 logger = logging.getLogger(__name__)
-
-
-# TODO: change update_well_pars to custom parameteriser class stuff
-# run(update_well_pars={stressmodel_name: istresses})
-def run(
-    stressmodel_parameterisers: list = [],
-) -> None:
-    # load packages
-    from pathlib import Path
-
-    from pandas import read_csv
-    from pastas.io.base import load as load_model
-
-    # base path
-    fpath = Path(__file__).parent
-
-    # load pastas model
-    ml = load_model(fpath / "model.pas")
-
-    # update standard pastas model parameters
-    parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
-    for pname, val in parameters.loc[:, "optimal"].items():
-        pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-        ml.set_parameter(pname, optimal=val)
-
-    # update custom stressmodel parameters
-    for sm_p in stressmodel_parameterisers:
-        sm_p.interpolate_stresses(**sm_p.interp_kwargs)
-
-    # simulate
-    simulation = ml.simulate()
-    simulation.loc[ml.observations().index].to_csv(fpath / "simulation.csv")
-
-
-def run_pypestworker(
-    pst: str | pyemu.Pst,
-    host: int,
-    port: int,
-    ml_dict: dict,
-    parameter_index: dict,
-) -> None:
-    from pastas.io.base import _load_model
-
-    ppw = pyemu.os_utils.PyPestWorker(
-        pst=pst,
-        host=host,
-        port=port,
-        verbose=False,
-    )
-    # load pastas model
-    ml = _load_model(ml_dict)  # load_model(ml_file)
-
-    pvals = ppw.get_parameters()
-    if pvals is None:
-        return None
-
-    while True:
-        for pname, val in pvals.items():
-            pname = parameter_index[pname]
-            # pname = pname.split(":")[-1] if ":" in pname else pname
-            # pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-            # pname = pname.replace("wellmodel","WellModel")
-            ml.set_parameter(pname, optimal=val)
-        sim = ml.simulate()
-        obsvals = sim.loc[ml.observations().index]
-        obsvals.index = ppw._pst.observation_data.index
-        ppw.send_observations(obsvals=obsvals)
-        pvals = ppw.get_parameters()
-        if pvals is None:
-            break
 
 
 class PestSolver(BaseSolver):
@@ -189,14 +120,15 @@ class PestSolver(BaseSolver):
     @stressmodel_parameterisers.setter
     def stressmodel_parameterisers(self, stressmodel_parameterisers) -> None:
         """Setter for setting stressmodel_parameterisers"""
-        self._stressmodel_parameterisers = stressmodel_parameterisers
+        self._stressmodel_parameterisers = (
+            [] if not stressmodel_parameterisers else stressmodel_parameterisers
+        )
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         # observations
         observations = self.ml.observations()
         observations.name = "Observations"
-        observations.index.name = "Datetime"
         observations.to_csv(self.model_ws / "simulation.csv")
         copy_file(self.model_ws / "simulation.csv", self.temp_ws)
         self.observations = observations
@@ -223,10 +155,6 @@ class PestSolver(BaseSolver):
         else:
             self.ml.settings["fit_constant"] = False
 
-        if self.ml.parameters.index.str.rsplit("_").str[0].str.isupper().any():
-            logger.error(
-                "pestpp is case insensitive so any capitalized parameters (stress model names) can cause issues in the solver."
-            )
         par_sel = parameters.loc[:, ["optimal"]]
         par_sel.to_csv(self.model_ws / "parameters_sel.csv")
         copy_file(self.model_ws / "parameters_sel.csv", self.temp_ws)
@@ -275,7 +203,7 @@ class PestSolver(BaseSolver):
 
         # add custom stressmodel parameters
         if self.stressmodel_parameterisers:
-            self.pf.extra_py_imports += ["from parameterisers import BaseParameteriser"]
+            # self.pf.extra_py_imports += ["from parameterisers import BaseParameteriser"]
             for sm_p in self.stressmodel_parameterisers:
                 sm_p.solver = self
                 # may need to customise par_name_base per sm_p depending on how (if)
@@ -532,11 +460,16 @@ class PestGlmSolver(PestSolver):
                 worker_root=self.temp_ws.parent,  # where to deploy the agent directories; relative to where python is running
                 master_dir=self.temp_ws,  # the manager directory
                 reuse_master=self.use_pypestworker,
-                ppw_function=self.ppw_function,
+                ppw_function=self.ppw_function
+                if self.use_pypestworker
+                else None,  # the function to run in the agent
                 ppw_kwargs={
                     "ml_dict": self.ml.to_dict(),
                     "parameter_index": self.parameter_index,
-                },
+                    "stressmodel_parameterisers": self.stressmodel_parameterisers,
+                }
+                if self.use_pypestworker
+                else {},  # the arguments to pass to the ppw_function
             )
         else:
             self.run()
@@ -551,7 +484,7 @@ class PestGlmSolver(PestSolver):
         # covariance
         pcov = pd.read_csv(
             self.temp_ws / f"pest.{self.nfev}.post.cov",
-            sep="\s+",
+            sep=r"\s+",
             skiprows=[0],
             nrows=len(ipar.index),
             header=None,
@@ -689,6 +622,7 @@ class PestHpSolver(PestSolver):
             ppw_kwargs={
                 "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
+                "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
@@ -698,7 +632,7 @@ class PestHpSolver(PestSolver):
         par = pd.read_csv(
             self.master_ws / "pest.par",
             index_col=0,
-            sep="\s+",
+            sep=r"\s+",
             skiprows=[0],
             header=None,
         )
@@ -710,7 +644,7 @@ class PestHpSolver(PestSolver):
         )
 
         ofr = pd.read_csv(
-            self.master_ws / "pest.ofr", index_col=0, sep="\s+", skiprows=2
+            self.master_ws / "pest.ofr", index_col=0, sep=r"\s+", skiprows=2
         )
         self.nfev = ofr.index[-1]
         self.obj_func = ofr.at[self.nfev, "total"]
@@ -890,6 +824,7 @@ class PestIesSolver(PestSolver):
             ppw_kwargs={
                 "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
+                "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
@@ -1340,28 +1275,9 @@ class PestIesSolver(PestSolver):
             - numpy.ndarray: The optimal parameters.
             - numpy.ndarray: The standard error of the parameters.
         """
-        if "noise" in kwargs:
-            del(kwargs["noise"])  # remove noise from kwargs, not used in PestIesSolver
-        if "weights" in kwargs:
-            del(kwargs["weights"])
-
         if run_ensembles:
             self.run_ensembles(**kwargs)
 
-        optimal, stderr = self.get_solve_results()
-
-        return True, optimal, stderr
-
-    def get_solve_results(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """
-        Get the results of the last solve operation.
-
-        Returns
-        -------
-        tuple
-            - numpy.ndarray: The optimal parameters.
-            - numpy.ndarray: The standard error of the parameters.
-        """
         # optimal parameters
         ipar = self.parameter_ensemble(iteration=self.nfev).transpose()
         ipar.index = self.ml.parameters.index[self.vary]
@@ -1372,7 +1288,8 @@ class PestIesSolver(PestSolver):
         stderr = np.full_like(optimal, np.nan)
         stderr[self.vary] = ipar.std(axis=1) / np.sqrt(len(ipar.columns))
 
-        return optimal, stderr
+        return True, optimal, stderr
+
 
 class PestSenSolver(PestSolver):
     """PESTPP-SEN (Global Sensitivity Analysis) solver"""

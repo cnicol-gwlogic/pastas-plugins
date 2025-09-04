@@ -1,0 +1,79 @@
+import pyemu
+
+
+# TODO: change update_well_pars to custom parameteriser class stuff
+# run(update_well_pars={stressmodel_name: istresses})
+def run() -> None:
+    # load packages
+    from pathlib import Path
+
+    from pandas import read_csv
+    from pastas.io.base import load as load_model
+
+    # base path
+    fpath = Path(__file__).parent
+
+    # load pastas model
+    ml = load_model(fpath / "model.pas")
+
+    # update standard pastas model parameters
+    parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
+    for pname, val in parameters.loc[:, "optimal"].items():
+        pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
+        ml.set_parameter(pname, optimal=val)
+
+    # simulate
+    simulation = ml.simulate()
+    simulation.loc[ml.observations().index].to_csv(fpath / "simulation.csv")
+
+
+def run_pypestworker(
+    pst: str | pyemu.Pst,
+    host: int,
+    port: int,
+    ml_dict: dict,
+    parameter_index: dict,
+    stressmodel_parameterisers: list = [],
+) -> None:
+    from pastas.io.base import _load_model
+
+    ppw = pyemu.os_utils.PyPestWorker(
+        pst=pst,
+        host=host,
+        port=port,
+        verbose=False,
+    )
+    # load pastas model
+    ml = _load_model(ml_dict)  # load_model(ml_file)
+
+    pvals = ppw.get_parameters()
+    if pvals is None:
+        return None
+
+    while True:
+        # update standard pastas model parameters
+        for pname, val in pvals.items():
+            pname = parameter_index[pname]
+            ml.set_parameter(pname, optimal=val)
+        # update custom stressmodel parameters
+        for sm_p in stressmodel_parameterisers:
+            # get df of updated (parameterised and interpolated) stress TimeSeries for model
+            updated_stress_ts = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
+            # update stress TimeSeries
+            smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+            for stress_series in smodel.stress:
+                stress_series.series_original = updated_stress_ts.loc[
+                    :, stress_series.name
+                ]
+
+        sim = ml.simulate()
+        obsvals = sim.loc[ml.observations().index]
+        obsvals.index = ppw._pst.observation_data.index
+        ppw.send_observations(obsvals=obsvals)
+        pvals = ppw.get_parameters()
+        if pvals is None:
+            break
+
+
+if __name__ == "__main__":
+    run()

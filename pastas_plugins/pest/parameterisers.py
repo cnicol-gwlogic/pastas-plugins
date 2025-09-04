@@ -1,5 +1,6 @@
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -92,6 +93,8 @@ class BaseParameteriser(ABC):
             self.stress = self.stressmodel.get_stress(squeeze=False)
 
         # Parameterisation things
+        self.source_points = None
+        self.target_points = None
         self.krig_factorfile = None
         self.krig_mpts = None
         self.stress_pars = None
@@ -253,6 +256,51 @@ class BaseParameteriser(ABC):
         return self._get_ppoint_cov(source_points)
 
     @staticmethod
+    def _interpolate(
+        func: Callable,
+        sourceval: npt.NDArray[np.float64],
+        targval_min: float,
+        targval_max: float,
+        kwargs_pputils: dict[str, Any],
+    ) -> npt.NDArray[np.float64]:
+        """
+        Interpolate source values to target coordinates using user-specified method.
+
+        Parameters
+        ----------
+        func : Callable
+            Pypestutils (or other) interpolation function
+        sourceval: npt.NDArray[np.float64]
+            Source values from which to interpolate to target coordinates.
+        targval_min : float
+            Interpolation output minimum allowed value. Default is 0.0.
+        targval_max : float
+            Interpolation output maximum allowed value. Default is 1.0e+16.
+
+        Returns
+        -------
+        targval : npt.NDArray[np.float64]
+            Target location values from the interpolation.
+        """
+
+        krig_offset = 0.0
+        if sourceval.min() <= 0.0:
+            krig_offset = abs(sourceval.min()) + 1.0e-3  # because we krig in log space
+            sourceval += krig_offset
+
+        kwargs_pputils["sourceval"] = sourceval
+
+        targval = func(**kwargs_pputils)
+        if isinstance(targval, dict):  # kriging output dict
+            targval = targval["targval"]
+
+        targval -= krig_offset
+        targval[targval < targval_min] = targval_min
+        targval[targval > targval_max] = targval_max
+
+        return targval
+
+    @staticmethod
     def _dtindex_to_days_elapsed(dtindex: DatetimeIndex) -> Series[float]:
         """
         Convert a Pandas datetimeindex to float ndays elapsed since min datetime.
@@ -263,12 +311,14 @@ class BaseParameteriser(ABC):
         self,
         targval_min: Optional[float] = 0.0,
         targval_max: Optional[float] = 1.0e16,
-        method: Literal["kriging", "step"] = "kriging",
+        invpow=2.0,
+        method: Literal["inv_dist_weighted", "step", "kriging"] = "inv_dist_weighted",
     ) -> None:
         """
         Class method for PestSolver.run() to interpolate stress pilot point interpolation
         parameters to the full stress timeseries, for each stress in stressmodel.
-        Updates stressmodel.stress inplace with new values.
+        Updates stressmodel.stress inplace with new values, and returns a DataFrame with the
+        updated data for use in pypestworker calls.
 
         Parameters
         ----------
@@ -276,7 +326,7 @@ class BaseParameteriser(ABC):
             Interpolation output minimum allowed value. Default is 0.0.
         targval_max : Optional[float]
             Interpolation output maximum allowed value. Default is 1.0e+16.
-        method : Literal["kriging","step"]
+        method : Literal["inv_dist_weighted","step","kriging"]
             Interpolation method to apply. Method \"step\" simply forward fills and then backward fills
             between the temporal pilot point parameter values, resulting in stepped stress rates.
             Kriging results in a smoothed interpolation between the pilot points. If only a single
@@ -284,7 +334,8 @@ class BaseParameteriser(ABC):
 
         Returns
         -------
-        None
+        updated_source_stresses : DataFrame | Series
+            Stressmodel stress TimeSeries.  Series if a single stress, DataFrame if multiple (eg WellModel)
         """
         sourcevals = pd.read_csv(
             self.modelfile, index_col=0, parse_dates=[0], date_format=self.date_format
@@ -301,32 +352,58 @@ class BaseParameteriser(ABC):
             source_stresses.loc[:, krig_cols] = (
                 source_stresses.loc[:, krig_cols].ffill().bfill()
             )
-        else:  # kriging interpolation over time required
-            for krig_col in krig_cols:
-                krig_offset = 0.0
-                if sourcevals.min() <= 0.0:
-                    krig_offset = (
-                        abs(sourcevals.min()) + 1.0e-3
-                    )  # because we krig in log space
-                    sourcevals += krig_offset
-                krig_dict = pputils.krige_using_file(
+        else:  # kriging or ipd interpolation over time required.
+            # In hindsight, kriging won't work with pypestworker because krige_using_file requires a file...not in memory.
+            # TODO: work out how to deal with this in pypestworker.
+            if method == "kriging":
+                logger.info("Interpolating stresses with kriging method.")
+                logger.warning(
+                    "Kriging not currently supported with pypestworker runs via PestSolver"
+                )
+                kwargs_pputils = dict(
                     factorfile=self.krig_factorfile,
                     factorfiletype=0,
                     mpts=self.krig_mpts,
                     krigtype=1,
                     transtype=1,
-                    sourceval=sourcevals,
                     nointerpval=np.nan,
                 )
-                targval = krig_dict["targval"]
-                targval -= krig_offset
-                targval[targval < targval_min] = targval_min
-                targval[targval > targval_max] = targval_max
+                func = pputils.krige_using_file
+            else:  # ipd
+                logger.info(
+                    "Interpolating stresses with inverse-power-of-distance method."
+                )
+                kwargs_pputils = dict(
+                    ecs=self.source_points.x.values.flatten(),
+                    ncs=self.source_points.y.values.flatten(),
+                    zns=self._get_zones(self.source_points),
+                    ect=self.target_points.x,
+                    nct=self.target_points.y,
+                    znt=np.ones(self.target_points.shape[0]).astype(int),
+                    transtype=1,
+                    anis=1.0,
+                    bearing=0.0,
+                    invpow=invpow,
+                )
+                func = pputils.ipd_interpolate_2d
+
+            for krig_col in krig_cols:
+                targval = self._interpolate(
+                    func,
+                    sourceval=sourcevals.loc[:, krig_col].values,
+                    targval_min=targval_min,
+                    targval_max=targval_max,
+                    kwargs_pputils=kwargs_pputils,
+                )
                 source_stresses.loc[self.stress.index, krig_col] = targval
+
+            updated_source_stresses = source_stresses
 
         # replace stressmodel.stress -> TODO: check that this works ok
         for stress_series in self.stressmodel.stress:
             stress_series.series_original = source_stresses.loc[:, stress_series.name]
+
+        return updated_source_stresses  # self.stress #self.stressmodel.stress
 
 
 class WellModelParameteriser(BaseParameteriser):
@@ -484,6 +561,8 @@ class WellModelParameteriser(BaseParameteriser):
                 columns=[c for c in source_points.columns if c not in ["x", "y"]],
                 inplace=True,
             )
+            self.source_points = source_points
+            self.target_points = target_points
             # define geostat variogram range for parameter interpolation (in krig_t space)
             self.t_variogram_range = (
                 pd.to_timedelta(self.par_freq) * self.t_variogram_range_freq_factor
