@@ -1,18 +1,17 @@
-import re
 import json
 import logging
-import dill #pickle
 from collections.abc import Callable
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from platform import node as get_computername
 from shutil import copy as copy_file
 from typing import Any, Literal, Optional
 
+import dill  # pickle
 import numpy as np
 import pandas as pd
 import pyemu
-from copy import deepcopy
 from numpy.typing import NDArray
 from pandas import DataFrame
 from pastas.solver import BaseSolver
@@ -88,19 +87,19 @@ class PestSolver(BaseSolver):
         -------
         None
         """
-        
+
         def __getstate__(self):
             # Exclude the logger and its handlers from the state to be pickled
             state = self.__dict__.copy()
-            if 'logger' in state:
-                del state['logger']
+            if "logger" in state:
+                del state["logger"]
             return state
 
         def __setstate__(self, state):
             # Reconstruct the logger after unpickling
             self.__dict__.update(state)
             self.logger = logging.getLogger(__name__)
-            
+
         BaseSolver.__init__(self, pcov=pcov, nfev=nfev, **kwargs)
         # model workspace (for pastas files)
         self.model_ws = Path(model_ws).resolve()
@@ -138,25 +137,26 @@ class PestSolver(BaseSolver):
         self._stressmodel_parameterisers = (
             [] if not stressmodel_parameterisers else stressmodel_parameterisers
         )
+
     @staticmethod
     def _get_uncfile_str(
-        cov : pyemu.Cov,
-        covmat_file : str | None = None,
-        var_mult : float = 1.0,
-        include_path : bool = False,
-        ) -> str:
+        cov: pyemu.Cov,
+        covmat_file: str | None = None,
+        var_mult: float = 1.0,
+        include_path: bool = False,
+    ) -> str:
         """Get PEST unc file content string for provided pyemu.Cov matrix"""
         cov.to_uncfile(
             "temp.unc",
             covmat_file=covmat_file,
             var_mult=var_mult,
-            include_path=include_path
-            )
+            include_path=include_path,
+        )
         with open("temp.unc", "r") as unc:
             unc_str = unc.read()
         Path("temp.unc").unlink()
         return unc_str
-    
+
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         # observations
@@ -243,7 +243,7 @@ class PestSolver(BaseSolver):
         self.ml_parname_to_pst = dict(
             zip(self.parameter_index.values(), self.parameter_index.keys())
         )
-        
+
         # add custom stressmodel parameters
         if self.stressmodel_parameterisers:
             for sm_p in self.stressmodel_parameterisers:
@@ -254,14 +254,14 @@ class PestSolver(BaseSolver):
                 # pickle to disk for pest non-pypestworker workers
                 fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl"
                 with open(fname, "wb") as f:
-                    dill.dump(sm_p, f) #pickle
+                    dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
-                self.parameter_index.update(dict(
-                    zip(sm_p.stress_pars.index, sm_p.stress_pars.index)
-                ))
-                self.ml_parname_to_pst.update(dict(
-                    zip(sm_p.stress_pars.index, sm_p.stress_pars.index)
-                ))
+                self.parameter_index.update(
+                    dict(zip(sm_p.stress_pars.index, sm_p.stress_pars.index))
+                )
+                self.ml_parname_to_pst.update(
+                    dict(zip(sm_p.stress_pars.index, sm_p.stress_pars.index))
+                )
 
         # observations and simulation
         self.pf.add_observations(
@@ -271,16 +271,12 @@ class PestSolver(BaseSolver):
         )
 
         # python scripts to run
-        self.pf.add_py_function(
-            self.run_function, "run()", is_pre_cmd=None
-        )
-        self.pf.mod_py_cmds.append(
-            "run()"
-        )
+        self.pf.add_py_function(self.run_function, "run()", is_pre_cmd=None)
+        self.pf.mod_py_cmds.append("run()")
 
         # create control file
         pst = self.pf.build_pst(self.pf.new_d / "pest.pst", version=version)
-        
+
         # pastas model parameter bounds
         pastas_pars_mask = pst.parameter_data.index.isin(pastas_ml_pars.values)
         pst.parameter_data.loc[pastas_pars_mask, ["parlbnd"]] = self.ml.parameters.loc[
@@ -295,7 +291,9 @@ class PestSolver(BaseSolver):
         pst = PestSolver.add_offsets(pst)
 
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
-        pst.parameter_data.loc[pastas_pars_mask, ["pargp"]] = self.par_sel.columns.to_list()
+        pst.parameter_data.loc[pastas_pars_mask, ["pargp"]] = (
+            self.par_sel.columns.to_list()
+        )
 
         # apply provided parameter group settings (FORCEN, DERINC etc)
         if self.par_group_settings is not None:
@@ -322,36 +320,42 @@ class PestSolver(BaseSolver):
         if isinstance(self, (PestHpSolver, PestGlmSolver)):
             if self.stressmodel_parameterisers:
                 for sm_p in self.stressmodel_parameterisers:
-                    pyemu.helpers.first_order_pearson_tikhonov(pst, sm_p.stress_parcov, reset=False)
-        
+                    pyemu.helpers.first_order_pearson_tikhonov(
+                        pst, sm_p.stress_parcov, reset=False
+                    )
+
         # build a list of parcovs for IES
         if isinstance(self, PestIesSolver):
             pastas_parcov = pyemu.Cov.from_parameter_data(
                 pst,
                 sigma_range=4.0,
                 scale_offset=False,
-                subset=pastas_ml_pars, #.to_list(), pyemu doc says str, but has to be a Series/Index
-                ) # returns a diagonal matrix
+                subset=pastas_ml_pars,  # .to_list(), pyemu doc says str, but has to be a Series/Index
+            )  # returns a diagonal matrix
             # I think the wording in pyemu doc is wrong on scale_offset=True by default.
             # Here, parval1 is already scaled and offset...why add those before doing cov calcs?
             # definitely get log par errors. Maybe pyemu does the anti-scale/offset immediately
             # before pst.write (scary!), whereas here we have already done that.
-            # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.            
-            unc_str = self._get_uncfile_str(pastas_parcov) # default args are for diagonals
+            # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.
+            unc_str = self._get_uncfile_str(
+                pastas_parcov
+            )  # default args are for diagonals
             pastas_parcov = None
             if self.stressmodel_parameterisers:
-                covmat_fname = str(self.temp_ws / f"pest.prior.{sm_p.stressmodel_name}.jco")
+                covmat_fname = str(
+                    self.temp_ws / f"pest.prior.{sm_p.stressmodel_name}.jco"
+                )
                 sm_p.stress_parcov.to_binary(covmat_fname)
                 for sm_p in self.stressmodel_parameterisers:
                     unc_str += self._get_uncfile_str(
                         sm_p.stress_parcov,
                         covmat_file=covmat_fname,
-                        var_mult=1.0, # TODO probs need a user variable here, or define internally based on par range for this stressmodel par set
+                        var_mult=1.0,  # TODO probs need a user variable here, or define internally based on par range for this stressmodel par set
                         include_path=False,
-                        )
-            with open(self.temp_ws / "pest.prior.unc","w") as unc:
+                    )
+            with open(self.temp_ws / "pest.prior.unc", "w") as unc:
                 unc.write(unc_str)
-        
+
         self.write_pst(pst=pst, version=version)
 
         with (self.temp_ws / "parameter_index.json").open("w") as f:
@@ -547,7 +551,7 @@ class PestGlmSolver(PestSolver):
                 if self.use_pypestworker
                 else None,  # the function to run in the agent
                 ppw_kwargs={
-                    "ml": self.ml, #"ml_dict": self.ml.to_dict(),
+                    "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                     "parameter_index": self.parameter_index,
                     "stressmodel_parameterisers": self.stressmodel_parameterisers,
                 }
@@ -706,7 +710,7 @@ class PestHpSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml, #"ml_dict": self.ml.to_dict(),
+                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
@@ -908,7 +912,7 @@ class PestIesSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml, #"ml_dict": self.ml.to_dict(),
+                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
@@ -1493,7 +1497,7 @@ class PestSenSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml, #"ml_dict": self.ml.to_dict(),
+                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
             }
             if self.use_pypestworker
