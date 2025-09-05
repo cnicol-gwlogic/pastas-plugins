@@ -1,18 +1,17 @@
 import pyemu
+from pastas import Model
 
 
-# TODO: change update_well_pars to custom parameteriser class stuff
-# run(update_well_pars={stressmodel_name: istresses})
 def run() -> None:
     # load packages
     import glob
-    import pickle
+    import dill #pickle
     from pathlib import Path
 
     from pandas import read_csv
     from pastas.io.base import load as load_model
 
-    from pastas_plugins.pest.parameterisers.py import (  # noqa: F401
+    from pastas_plugins.pest.parameterisers import (  # noqa: F401
         BaseParameteriser,
         WellModelParameteriser,
     )
@@ -30,7 +29,7 @@ def run() -> None:
         ml.set_parameter(pname, optimal=val)
     # update custom stressmodel parameters
     pickles = glob.glob(fpath / "*.parameteriser.pkl")
-    stressmodel_parameterisers = [pickle.load(open(sm_p, "rb")) for sm_p in pickles]
+    stressmodel_parameterisers = [dill.load(open(sm_p, "rb")) for sm_p in pickles] #pickle.load(
     for sm_p in stressmodel_parameterisers:
         # get df of updated (parameterised and interpolated) stress TimeSeries for model
         updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
@@ -48,13 +47,13 @@ def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
-    ml_dict: dict,
+    ml: Model, #ml_dict: dict,
     parameter_index: dict,
     stressmodel_parameterisers: list = [],
 ) -> None:
+    from logging import getLogger
     from pastas.io.base import _load_model
-
-    from pastas_plugins.pest.parameterisers.py import (  # noqa: F401
+    from pastas_plugins.pest.parameterisers import (  # noqa: F401
         BaseParameteriser,
         WellModelParameteriser,
     )
@@ -65,8 +64,15 @@ def run_pypestworker(
         port=port,
         verbose=False,
     )
+    
     # load pastas model
-    ml = _load_model(ml_dict)  # load_model(ml_file)
+    #ml = _load_model(ml_dict)  # load_model(ml_file)
+    
+    # reactivate the model logger - it was deactivated before provision
+    # as an arg to this module.
+    # (multiprocesing uses pickling (of ml in this case), and pickle
+    # can't pickle open file handle logger instances)
+    ml.logger = getLogger(ml.__name__)
 
     pvals = ppw.get_parameters()
     if pvals is None:
