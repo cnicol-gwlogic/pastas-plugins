@@ -257,10 +257,20 @@ class PestSolver(BaseSolver):
                     dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
                 self.parameter_index.update(
-                    dict(zip(sm_p.stress_pars.index, sm_p.stress_pars.index))
+                    dict(
+                        zip(
+                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                        )
+                    )
                 )
                 self.ml_parname_to_pst.update(
-                    dict(zip(sm_p.stress_pars.index, sm_p.stress_pars.index))
+                    dict(
+                        zip(
+                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                        )
+                    )
                 )
 
         # observations and simulation
@@ -288,6 +298,7 @@ class PestSolver(BaseSolver):
 
         # TODO: custom stressmodel parameters' bounds
 
+        # add parval/bound offsets as needed depending on par_transform and zero values at bounds
         pst = PestSolver.add_offsets(pst)
 
         pst.parameter_data.loc[:, ["parchglim"]] = "relative"
