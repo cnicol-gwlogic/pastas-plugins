@@ -28,7 +28,7 @@ def run() -> None:
         pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
         ml.set_parameter(pname, optimal=val)
     # update custom stressmodel parameters
-    pickles = glob.glob(fpath / "*.parameteriser.pkl")
+    pickles = glob.glob(str(fpath / "*.parameteriser.pkl"))
     stressmodel_parameterisers = [
         dill.load(open(sm_p, "rb")) for sm_p in pickles
     ]  # pickle.load(
@@ -38,7 +38,10 @@ def run() -> None:
         # update stress TimeSeries
         smodel = ml.stressmodels.get(sm_p.stressmodel_name)
         for stress_series in smodel.stress:
-            stress_series.series_original = updated_stress_df.loc[:, stress_series.name]
+            if stress_series in sm_p.stress_names:
+                stress_series.series_original = updated_stress_df.loc[
+                    :, stress_series.name
+                ]
 
     # simulate
     simulation = ml.simulate()
@@ -97,9 +100,10 @@ def run_pypestworker(
             # update stress TimeSeries
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
             for stress_series in smodel.stress:
-                stress_series.series_original = updated_stress_df.loc[
-                    :, stress_series.name
-                ]
+                if stress_series in sm_p.stress_names:
+                    stress_series.series_original = updated_stress_df.loc[
+                        :, stress_series.name
+                    ]
 
         sim = ml.simulate()
         obsvals = sim.loc[ml.observations().index]

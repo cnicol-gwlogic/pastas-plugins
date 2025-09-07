@@ -212,6 +212,18 @@ class BaseParameteriser(ABC):
         -------
         None
         """
+        if self.par_bounds is not None:
+            sill = self.par_bounds.loc[self.source_points.index, ["parubnd", "parlbnd"]]
+            if self.solver.par_transform == "log":
+                sill_mins = sill.groupby(level="column_names")["parlbnd"].transform(
+                    "min"
+                )
+                sill = (sill.add(sill_mins.abs(), axis="index") + 0.1).apply(
+                    np.log10
+                )  # log nonzero values
+            sill["par_range"] = sill.parubnd - sill.parlbnd
+            sill["variance"] = (sill.par_range / 4.0) ** 2
+
         if self.par_freq is None:
             self.stress_parcov = pyemu.Cov(
                 x=self.t_variogram_sill,
@@ -229,7 +241,9 @@ class BaseParameteriser(ABC):
                     vartype=1,
                     nugget=0.0,
                     aa=source_points.xs(col).vario_ranges.values,
-                    sill=self.t_variogram_sill,
+                    sill=self.t_variogram_sill
+                    if self.par_bounds is None
+                    else sill.xs(col).variance.values,
                     anis=1.0,
                     bearing=0.0,
                     ldcovmat=source_points.xs(col).shape[
@@ -462,9 +476,7 @@ class BaseParameteriser(ABC):
         if method == "step":
             source_stresses.loc[:, krig_cols] = np.nan
             for krig_col in krig_cols:
-                source_stresses.loc[sourcevals.index, krig_cols] = sourcevals.xs(
-                    krig_col
-                )
+                source_stresses.loc[:, krig_cols] = sourcevals.xs(krig_col)
                 source_stresses.loc[:, krig_cols] = (
                     source_stresses.loc[:, krig_cols].ffill().bfill()
                 )
@@ -524,9 +536,12 @@ class BaseParameteriser(ABC):
 
         updated_source_stresses = source_stresses
 
-        # replace stressmodel.stress -> TODO: check that this works ok. Edit: We do it in worker forward_run.py anyway, so maybe not an issue.
+        # replace stressmodel.stress
         for stress_series in self.stressmodel.stress:
-            stress_series.series_original = source_stresses.loc[:, stress_series.name]
+            if stress_series in self.stress_names:
+                stress_series.series_original = source_stresses.loc[
+                    :, stress_series.name
+                ]
 
         return updated_source_stresses  # self.stress #self.stressmodel.stress
 
@@ -552,8 +567,8 @@ class WellModelParameteriser(BaseParameteriser):
         If None, all stresses in the wellmodel are parameterised. Default is None.
     par_freq : str | None, optional
         If 'at_rate_changes': pilot points are placed at rate step change points (and first record). Covariance
-        range of these points is then defined based on the the median time interval between adjacent pilot points
-        (multiplied by t_variogram_range_freq_factor; see below).
+        range of these points is then defined based on the median time interval between adjacent pilot points
+        (multiplied by t_variogram_range_freq_factor, and capped by max_vario_range; see below).
         Otherwise: Frequency at which temporal WellModel rate pilot points are defined for each stress in stress_names.
         Must be None or one of the following: (D, h, m, s, ms, us, ns) or a multiple of that e.g. "7D".
         If None, a single (constant-in-time) stress rate parameter is defined for all stresses in stress_names.
@@ -562,6 +577,8 @@ class WellModelParameteriser(BaseParameteriser):
         par_freq factor to define temporal variogram range to build a parameter covariance matrix for input to
         pyemu.helpers.first_order_pearson_tikhonov(). Default is 2.0, so for example if par_freq is 365D, this means
         pars covary up to the sill variance over 730D.
+    max_vario_range Optional[float] :
+        Maximum variogram range for temporal interpolation points (units: days). Default is 730.0.
     t_variogram_sill: float, optional
         Temporal variogram sill (variance at t_variogram_range) used to build a scaling parameter
         covariance matrix for input to pyemu.helpers.first_order_pearson_tikhonov().
@@ -569,9 +586,7 @@ class WellModelParameteriser(BaseParameteriser):
         If par_freq is None, t_variogram_sill is used to define parameter variance in the returned
         diagonal prior (co)variance matrix. Default is 1.0.
         t_variogram_sill is ignored if par_bounds is provided.
-    max_vario_range Optional[float] :
-        Maximum variogram range for temporal interpolation points (units: days). Default is 730.0.
-    par_bounds: Optional[DataFrame]
+    par_bounds: Optional[DataFrame| None]
         DataFrame multiindexed by [stressmodel stress TimeSeries name (bore), Datetime].
         Columns must include 'parlbnd' and 'parubnd'; these must be in untransformed parameter space.
         Assigned to nearest pilot point in time to Datetime (depends on par_freq).
@@ -607,8 +622,8 @@ class WellModelParameteriser(BaseParameteriser):
         stress_names: list[str] | None = None,
         par_freq: str | None = None,
         t_variogram_range_freq_factor: float | None = None,
-        t_variogram_sill: float = 1.0,
         max_vario_range: Optional[float] = 730.0,
+        t_variogram_sill: float = 1.0,
         par_bounds: Optional[DataFrame | None] = None,
     ) -> None:
         BaseParameteriser.__init__(
@@ -621,8 +636,11 @@ class WellModelParameteriser(BaseParameteriser):
 
         if (
             stress_names is not None
-        ):  # replace default all stress_names with only a selection to parameterise
+        ):  # replace default all stress_names (from BaseParameteriser.__init__() with only a selection to parameterise
             self.stress_names = stress_names
+        logger.info(
+            rf"Modelling {len(self.stress_names)} stress names in {wellmodel_name}:\n --> {', '.join(self.stress_names)}"
+        )
         if par_freq:
             if par_freq.lower() == "at_rate_changes":
                 self.par_freq = par_freq
@@ -633,6 +651,10 @@ class WellModelParameteriser(BaseParameteriser):
         self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
         self.t_variogram_sill = t_variogram_sill
         self.max_vario_range = max_vario_range
+        self.par_bounds = par_bounds
+
+        # filter stress based on provided wellmodel_names
+        self.stress = self.stress.filter(items=self.stress_names, axis="columns")
 
     def _get_stress_pars(self, par_name_base: str) -> DataFrame:
         """Build interpolation source points for None, "par_freq" and "at_rate_changes" methods"""
@@ -675,26 +697,26 @@ class WellModelParameteriser(BaseParameteriser):
                 .fillna(0.0)
                 .x
             )
-            # source_points.loc[:, "median_intervals"] = (
-            #    source_points[["intervals", "column_names"]]
-            #    .groupby(by="column_names")
-            #    .transform("median")
-            #    .intervals
-            # )
-            source_points.loc[:, "rolling_4xmean_intervals"] = (
-                (
-                    source_points[["intervals", "column_names"]]
-                    .groupby(by="column_names")["intervals"]
-                    .rolling(window=4, min_periods=1, center=True)
-                    .mean()
-                    .transform(lambda x: x)
-                )
-                .ffill()
-                .bfill()
+            source_points.loc[:, "median_intervals"] = (
+                source_points[["intervals", "column_names"]]
+                .groupby(by="column_names")
+                .transform("median")
+                .intervals
             )
+            """source_points = source_points.reset_index(drop=False).set_index(["Datetime", "column_names"])
+            windexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=3)
+            source_points.loc[:, "rolling_4xmean_intervals"] = (
+                source_points.groupby(level=["column_names"])["intervals"]
+                .rolling(window=windexer, min_periods=1)
+                .mean().ffill().bfill().droplevel(level=-1).values #transform(lambda x: x)
+            )
+            source_points.to_csv("temp.source_points.csv", date_format=self.date_format)
+            source_points = source_points.reset_index(drop=False).set_index("Datetime")
             source_points.loc[:, "vario_ranges"] = (
-                source_points.rolling_4xmean_intervals
-                * self.t_variogram_range_freq_factor
+                source_points.rolling_4xmean_intervals * self.t_variogram_range_freq_factor
+            ).clip(upper=self.max_vario_range)"""
+            source_points.loc[:, "vario_ranges"] = (
+                source_points.median_intervals * self.t_variogram_range_freq_factor
             ).clip(upper=self.max_vario_range)
 
         elif self.par_freq is not None:  # regular frequency pilot points
@@ -730,11 +752,22 @@ class WellModelParameteriser(BaseParameteriser):
             logger.error(f"Unsupported value for par_freq provided ({self.par_freq}).")
             raise Exception
 
+        # revert flow rate diffs to flow rates
+        source_points.index.name = "Datetime"  # does this work? should do now with df.melt(ignore_index=False) above
+        source_points = source_points.reset_index(drop=False).set_index(
+            ["column_names", "Datetime"]
+        )
+        source_points["value"] = (
+            self.stress.melt(var_name="column_names", ignore_index=False)
+            .reset_index(drop=False)
+            .set_index(["column_names", "Datetime"])["value"]
+        )
+        source_points = source_points.reset_index(drop=False).set_index("Datetime")
+
         # convert stress datetime to timedelta from t0 as float(totaldays) for kriging
         source_points["x"] = self._dtindex_to_days_elapsed(source_points.index)
         source_points["y"] = 1.0
 
-        source_points.index.name = "Datetime"  # does this work? should do now with df.melt(ignore_index=False) above
         source_points.to_csv(
             self.modelfile, date_format=self.date_format
         )  # parameterised by pstfrom
@@ -796,11 +829,6 @@ class WellModelParameteriser(BaseParameteriser):
                 't_variogram_sill provided to PestSolver.add_well_rate_parameters() must pertain to log-transfomed parameter space (PestSolver.par_transform == "log")'
             )
 
-        # TODO: DEFINE/HANDLE RATE PAR BOUNDS
-        # Need a dict or df of stress TimeSeries name: ubnd/lbnd at a minimum.
-        # Probs need time field in there too, so maybe initial stress rates pilot points can be used,
-        # with user-supplied ubnd and lbnd factors of the initial rate. <- this is it
-
         self.stress.index.name = "Datetime"
 
         # define target points for kriging by time
@@ -812,7 +840,7 @@ class WellModelParameteriser(BaseParameteriser):
             inplace=True,
         )
         self.target_points = target_points
-        # define source points for kriging
+        # define source points for kriging / build pest tpl file
         self.source_points = self._get_stress_pars(par_name_base)
 
         # build index between pest parnames from self.stress_pars and self.modelfile parameterised columns and indices.
@@ -826,6 +854,15 @@ class WellModelParameteriser(BaseParameteriser):
             ["column_names", "Datetime"]
         )
         self.source_points["parnme"] = self.stress_pars.parnme
+
+        # TODO: DEFINE/HANDLE RATE PAR BOUNDS
+        # Need a dict or df of stress TimeSeries name: ubnd/lbnd at a minimum.
+        # Probs need time field in there too, so maybe initial stress rates pilot points can be used,
+        # with user-supplied ubnd and lbnd factors of the initial rate. <- this is it
+        if self.par_bounds is not None:
+            self.stress_pars.loc[:, ["parlbnd", "parubnd"]] = self.par_bounds.loc[
+                :, ["parlbnd", "parubnd"]
+            ]
 
         # make pcov for pilot points
         self._get_ppoint_cov(self.source_points)
