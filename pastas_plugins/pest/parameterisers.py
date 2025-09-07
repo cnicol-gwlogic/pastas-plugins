@@ -212,39 +212,48 @@ class BaseParameteriser(ABC):
         -------
         None
         """
-        # easiest to use build_covar_matrix_2d here with zones being column_names,
-        # but build_covar_matrix_2d can only handle <=10 zones. Se we concat to block diagonal matrix manually
-        covs = [
-            pputils.build_covar_matrix_2d(
-                ec=source_points.xs(col).x.values.flatten(),
-                nc=source_points.xs(col).y.values.flatten(),
-                zn=1,
-                vartype=1,
-                nugget=0.0,
-                aa=source_points.xs(col).vario_ranges.values,
-                sill=self.t_variogram_sill,
-                anis=1.0,
-                bearing=0.0,
-                ldcovmat=source_points.xs(col).shape[
-                    0
-                ],  # I think this is right (?). Don't think it matters as this covmat is square.
+        if self.par_freq is None:
+            self.stress_parcov = pyemu.Cov(
+                x=self.t_variogram_sill,
+                names=self.source_points.column_names,
+                isdiagonal=True,
             )
-            for col in source_points.index.get_level_values("column_names").unique()
-        ]  # one cov per wellmodel stress timeseries -> all to be concatenated into one block diagonal cov
-        names_list = [
-            names
-            for names in [
-                source_points.xs(col).parnme.to_list()
+        else:
+            # easiest to use build_covar_matrix_2d here with zones being column_names,
+            # but build_covar_matrix_2d can only handle <=10 zones. Se we concat to block diagonal matrix manually
+            covs = [
+                pputils.build_covar_matrix_2d(
+                    ec=source_points.xs(col).x.values.flatten(),
+                    nc=source_points.xs(col).y.values.flatten(),
+                    zn=1,
+                    vartype=1,
+                    nugget=0.0,
+                    aa=source_points.xs(col).vario_ranges.values,
+                    sill=self.t_variogram_sill,
+                    anis=1.0,
+                    bearing=0.0,
+                    ldcovmat=source_points.xs(col).shape[
+                        0
+                    ],  # I think this is right (?). Don't think it matters as this covmat is square.
+                )
                 for col in source_points.index.get_level_values("column_names").unique()
+            ]  # one cov per wellmodel stress timeseries -> all to be concatenated into one block diagonal cov
+            names_list = [
+                names
+                for names in [
+                    source_points.xs(col).parnme.to_list()
+                    for col in source_points.index.get_level_values(
+                        "column_names"
+                    ).unique()
+                ]
             ]
-        ]
-        stress_parcovs = [
-            pyemu.Cov(x=cov, names=names, isdiagonal=False).df()
-            for cov, names in zip(covs, names_list)
-        ]
-        self.stress_parcov = pyemu.Cov.from_dataframe(
-            pd.concat(stress_parcovs).fillna(0.0)
-        )
+            stress_parcovs = [
+                pyemu.Cov(x=cov, names=names, isdiagonal=False).df()
+                for cov, names in zip(covs, names_list)
+            ]
+            self.stress_parcov = pyemu.Cov.from_dataframe(
+                pd.concat(stress_parcovs).fillna(0.0)
+            )
 
         return
 
@@ -425,11 +434,11 @@ class BaseParameteriser(ABC):
         if not updated_sourcevals:  # non-pypestworker call (worker dirs on disk)
             sourcevals = pd.read_csv(
                 self.modelfile,
-                index_col=0,
-                parse_dates=[0],
+                index_col=["column_names", "Datetime"],
+                parse_dates=["Datetime"],
                 date_format=self.date_format,
-            )  # one col per stress. Need to krig or step interp each for which we have adjustable parameters.
-        else:  # pypestworker call
+            )  # read pest-updated values from disk
+        else:  # pypestworker call - updated values from series (parnme:value) in memory
             if not self.solver.longnames:
                 raise Exception(
                     f"PestSolver.longnames must be True for {self._name}.interpolate_stress.updated_sourcevals to work as currently coded.\n \
@@ -437,26 +446,28 @@ class BaseParameteriser(ABC):
                 )  # see TODO note above for a possible solution.
             sourcevals = self.modelfile_df_org.copy()
             # self.stress_pars (returned pstfrom() df) has usecol and parnme in it? We could use that (better than reading from disk). <--see self.parnme_indexer
-            for krig_col in sourcevals.columns:
+            for krig_col, df in sourcevals.groupby(level="column_names"):
                 parnames = self.stress_pars.loc[
-                    self.stress_pars.usecols == krig_col
+                    self.stress_pars.column_names == krig_col
                 ].parnme
                 # usecols = self.parnme_indexer.loc[parnames].column_names
-                indexer = self.parnme_indexer.loc[parnames].indices
-                sourcevals.loc[indexer, krig_col] = updated_sourcevals.loc[parnames]
+                indexer = self.parnme_indexer.loc[parnames].indices  # Datetime
+                sourcevals.loc[[krig_col, indexer], "value"] = updated_sourcevals.loc[
+                    parnames
+                ].values
 
         krig_cols = self.stress_names
-        source_stresses = self.stress.copy()
-
-        if sourcevals.shape[0] == 1:  # constant-in-time ffill / bfill needed
-            method = "step"  # force step interp for single parameter values per stress TimeSeries
+        source_stresses = self.stress.copy()  # crosstab with columns of stressmodel rate timeseries (per bore). Index is datetime
 
         if method == "step":
             source_stresses.loc[:, krig_cols] = np.nan
-            source_stresses.loc[sourcevals.index, krig_cols] = sourcevals
-            source_stresses.loc[:, krig_cols] = (
-                source_stresses.loc[:, krig_cols].ffill().bfill()
-            )
+            for krig_col in krig_cols:
+                source_stresses.loc[sourcevals.index, krig_cols] = sourcevals.xs(
+                    krig_col
+                )
+                source_stresses.loc[:, krig_cols] = (
+                    source_stresses.loc[:, krig_cols].ffill().bfill()
+                )
         else:  # kriging or ipd interpolation over time required.
             # In hindsight, kriging won't work with pypestworker because krige_using_file requires a file...not in memory.
             # Although, this kriging factors file never changes - it's written once on add_parameters() in this class' instantiation.
@@ -498,7 +509,9 @@ class BaseParameteriser(ABC):
             for krig_col in krig_cols:
                 targval = self._interpolate(
                     func,
-                    sourceval=sourcevals.loc[:, krig_col].values,
+                    sourceval=sourcevals.xs(
+                        krig_col
+                    ).values,  # not right - we need to filter sourcevals from parnames per "column_names" (stress name)
                     targval_min=targval_min,
                     targval_max=targval_max,
                     kwargs_pputils=kwargs_pputils,
@@ -509,7 +522,7 @@ class BaseParameteriser(ABC):
                     source_stresses.loc[:, krig_col].ffill().bfill()
                 )
 
-            updated_source_stresses = source_stresses
+        updated_source_stresses = source_stresses
 
         # replace stressmodel.stress -> TODO: check that this works ok. Edit: We do it in worker forward_run.py anyway, so maybe not an issue.
         for stress_series in self.stressmodel.stress:
@@ -556,6 +569,8 @@ class WellModelParameteriser(BaseParameteriser):
         If par_freq is None, t_variogram_sill is used to define parameter variance in the returned
         diagonal prior (co)variance matrix. Default is 1.0.
         t_variogram_sill is ignored if par_bounds is provided.
+    max_vario_range Optional[float] :
+        Maximum variogram range for temporal interpolation points (units: days). Default is 730.0.
     par_bounds: Optional[DataFrame]
         DataFrame multiindexed by [stressmodel stress TimeSeries name (bore), Datetime].
         Columns must include 'parlbnd' and 'parubnd'; these must be in untransformed parameter space.
@@ -593,6 +608,7 @@ class WellModelParameteriser(BaseParameteriser):
         par_freq: str | None = None,
         t_variogram_range_freq_factor: float | None = None,
         t_variogram_sill: float = 1.0,
+        max_vario_range: Optional[float] = 730.0,
         par_bounds: Optional[DataFrame | None] = None,
     ) -> None:
         BaseParameteriser.__init__(
@@ -616,9 +632,10 @@ class WellModelParameteriser(BaseParameteriser):
             self.par_freq = None
         self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
         self.t_variogram_sill = t_variogram_sill
+        self.max_vario_range = max_vario_range
 
-    def _get_transient_stress_pars(self, par_name_base: str) -> DataFrame:
-        """Build interpolation source points for "par_freq" and "at_rate_changes" methods"""
+    def _get_stress_pars(self, par_name_base: str) -> DataFrame:
+        """Build interpolation source points for None, "par_freq" and "at_rate_changes" methods"""
         if self.par_freq == "at_rate_changes":
             source_points = self.stress.diff().melt(
                 var_name="column_names", ignore_index=False
@@ -658,16 +675,29 @@ class WellModelParameteriser(BaseParameteriser):
                 .fillna(0.0)
                 .x
             )
-            source_points.loc[:, "median_intervals"] = (
-                source_points[["intervals", "column_names"]]
-                .groupby(by="column_names")
-                .transform("median")
-                .intervals
+            # source_points.loc[:, "median_intervals"] = (
+            #    source_points[["intervals", "column_names"]]
+            #    .groupby(by="column_names")
+            #    .transform("median")
+            #    .intervals
+            # )
+            source_points.loc[:, "rolling_4xmean_intervals"] = (
+                (
+                    source_points[["intervals", "column_names"]]
+                    .groupby(by="column_names")["intervals"]
+                    .rolling(window=4, min_periods=1, center=True)
+                    .mean()
+                    .transform(lambda x: x)
+                )
+                .ffill()
+                .bfill()
             )
             source_points.loc[:, "vario_ranges"] = (
-                source_points.median_intervals * self.t_variogram_range_freq_factor
-            )
-        else:  # regular frequency pilot points
+                source_points.rolling_4xmean_intervals
+                * self.t_variogram_range_freq_factor
+            ).clip(upper=self.max_vario_range)
+
+        elif self.par_freq is not None:  # regular frequency pilot points
             stress_pars = self.stress.resample(self.par_freq).first()
             if (
                 self.stress.index.max() not in stress_pars.index
@@ -685,7 +715,20 @@ class WellModelParameteriser(BaseParameteriser):
             self.t_variogram_range = (
                 pd.to_timedelta(self.par_freq) * self.t_variogram_range_freq_factor
             ).total_seconds() / 86400.0
-            source_points.loc[:, "vario_ranges"] = self.t_variogram_range
+            source_points.loc[:, "vario_ranges"] = min(
+                self.t_variogram_range, self.max_vario_range
+            )
+
+        elif (
+            self.par_freq is None
+        ):  # - a single parameter per stress TimeSeries, which is applied constant in time
+            # constant-in-time scaling parameter applied
+            source_points = self.stress.iloc[[0], :].melt(
+                var_name="column_names", ignore_index=False
+            )  # value_name (stress rate) is left at "value"
+        else:
+            logger.error(f"Unsupported value for par_freq provided ({self.par_freq}).")
+            raise Exception
 
         # convert stress datetime to timedelta from t0 as float(totaldays) for kriging
         source_points["x"] = self._dtindex_to_days_elapsed(source_points.index)
@@ -759,65 +802,35 @@ class WellModelParameteriser(BaseParameteriser):
         # with user-supplied ubnd and lbnd factors of the initial rate. <- this is it
 
         self.stress.index.name = "Datetime"
-        if self.par_freq is None:
-            # constant-in-time scaling parameter applied
-            source_points = self.stress.iloc[[0], :].melt(
-                var_name="column_names", ignore_index=False
-            )  # value_name (stress rate) is left at "value"
-            source_points.index.name = "Datetime"
-            source_points.to_csv(self.modelfile, date_format=self.date_format)
-            pargp_indices = (
-                source_points.column_names != source_points.column_names.shift()
-            ).cumsum()
-            pargp = pargp_indices.apply(
-                lambda s: f"wellq.{self.stressmodel.name}.{str(s).zfill(2)}"
-            ).to_list()
-            self.stress_pars = self.solver.pf.add_parameters(
-                self.modelfile,
-                index_cols=[source_points.index.name, "column_names"],
-                use_cols=["value"],
-                par_type="grid",
-                par_style="direct",
-                transform=self.solver.par_transform,
-                pargp=pargp,
-                par_name_base=par_name_base,
-                # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
-                # upper_bound=self.ml.parameters.loc[self.vary, "pmax"].values.tolist(),
-                # ult_lbound = self.ml.parameters.loc[self.vary, ["pmin"]].transpose().values.tolist(),
-                # ult_ubound = self.ml.parameters.loc[self.vary, ["pmax"]].transpose().values.tolist(),
-            )
-            self.stress_parcov = pyemu.Cov(
-                x=self.t_variogram_sill, names=self.column_names, isdiagonal=True
-            )
-        else:
-            # define target points for kriging by time
-            target_points = self.stress.copy()
-            target_points["x"] = self._dtindex_to_days_elapsed(target_points.index)
-            target_points["y"] = 1.0
-            target_points.drop(
-                columns=[c for c in target_points.columns if c not in ["x", "y"]],
-                inplace=True,
-            )
-            self.target_points = target_points
-            # define source points for kriging
-            self.source_points = self._get_transient_stress_pars(par_name_base)
 
-            # build index between pest parnames from self.stress_pars and self.modelfile parameterised columns and indices.
-            self._build_parnme_indexer()  # now self.parnme_indexer is gettable. Also adds a usecol field to the self.stress_pars df (and "index_org" - the original index values from stress df)
+        # define target points for kriging by time
+        target_points = self.stress.copy()
+        target_points["x"] = self._dtindex_to_days_elapsed(target_points.index)
+        target_points["y"] = 1.0
+        target_points.drop(
+            columns=[c for c in target_points.columns if c not in ["x", "y"]],
+            inplace=True,
+        )
+        self.target_points = target_points
+        # define source points for kriging
+        self.source_points = self._get_stress_pars(par_name_base)
 
-            # assign parnme to source_points; make all df indices a mux: (stressmodelname,datetime)
-            self.stress_pars = self.stress_pars.reset_index(drop=False).set_index(
-                ["column_names", "index_org"]
-            )
-            self.source_points = self.source_points.reset_index(drop=False).set_index(
-                ["column_names", "Datetime"]
-            )
-            self.source_points["parnme"] = self.stress_pars.parnme
+        # build index between pest parnames from self.stress_pars and self.modelfile parameterised columns and indices.
+        self._build_parnme_indexer()  # now self.parnme_indexer is gettable. Also adds a usecol field to the self.stress_pars df (and "index_org" - the original index values from stress df)
 
-            # make pcov for pilot points
-            self._get_ppoint_cov(self.source_points)
+        # assign parnme to source_points; make all df indices a mux: (stressmodelname,datetime)
+        self.stress_pars = self.stress_pars.reset_index(drop=False).set_index(
+            ["column_names", "index_org"]
+        )
+        self.source_points = self.source_points.reset_index(drop=False).set_index(
+            ["column_names", "Datetime"]
+        )
+        self.source_points["parnme"] = self.stress_pars.parnme
 
-            # and save a copy of self.modelfile data in memory for pypestworker updates
-            self.modelfile_df_org = pd.read_csv(
-                self.modelfile, index_col=0, date_format=self.date_format
-            )
+        # make pcov for pilot points
+        self._get_ppoint_cov(self.source_points)
+
+        # and save a copy of self.modelfile data in memory for pypestworker updates
+        self.modelfile_df_org = pd.read_csv(
+            self.modelfile, index_col=0, date_format=self.date_format
+        )

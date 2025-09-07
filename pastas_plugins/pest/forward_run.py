@@ -96,7 +96,6 @@ def run_pypestworker(
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
             # update stress TimeSeries
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-            # TODO update this to deal with flat (melted) rather than pivoted stress timeseries df - dead easy where column_names==smodel
             for stress_series in smodel.stress:
                 stress_series.series_original = updated_stress_df.loc[
                     :, stress_series.name
