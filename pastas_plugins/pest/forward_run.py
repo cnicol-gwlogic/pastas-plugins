@@ -20,13 +20,14 @@ def run() -> None:
     fpath = Path(__file__).parent
 
     # load pastas model
-    ml = load_model(fpath / "model.pas")
+    models = [load_model(m) for m in glob.glob(str(fpath / "model_*.pas"))]
 
     # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
-    for pname, val in parameters.loc[:, "optimal"].items():
-        pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-        ml.set_parameter(pname, optimal=val)
+    for ml in models:
+        for pname, val in parameters.loc[:, "optimal"].items():
+            pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
+            ml.set_parameter(pname[3:], optimal=val)
     # update custom stressmodel parameters
     pickles = glob.glob(str(fpath / "*.parameteriser.pkl"))
     stressmodel_parameterisers = [
@@ -36,16 +37,22 @@ def run() -> None:
         # get df of updated (parameterised and interpolated) stress TimeSeries for model
         updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
         # update stress TimeSeries
-        smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-        for stress_series in smodel.stress:
-            if stress_series in sm_p.stress_names:
-                stress_series.series_original = updated_stress_df.loc[
-                    :, stress_series.name
-                ]
+        for ml in models:
+            smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+            for stress_series in smodel.stress:
+                if stress_series in sm_p.stress_names:
+                    stress_series.series_original = updated_stress_df.loc[
+                        :, stress_series.name
+                    ]
+    # ^^ one sm_p even for many pastas models in one pest cal will work ok - we just update the stress rates,
+    # while pumping well distances from each model (obs bore) remain as originally defined per model.
+    # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
 
     # simulate
-    simulation = ml.simulate()
-    simulation.loc[ml.observations().index].to_csv(fpath / "simulation.csv")
+    for ml in models:
+        ml_name = ml.name
+        simulation = ml.simulate()
+        simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv")
 
 
 def run_pypestworker(

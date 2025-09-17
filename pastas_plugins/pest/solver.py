@@ -98,7 +98,7 @@ class PestSolver(BaseSolver):
         def __setstate__(self, state):
             # Reconstruct the logger after unpickling
             self.__dict__.update(state)
-            self.logger = logging.getLogger(__name__)
+            logger = logging.getLogger(__name__)
 
         BaseSolver.__init__(self, pcov=pcov, nfev=nfev, **kwargs)
         # model workspace (for pastas files)
@@ -125,6 +125,21 @@ class PestSolver(BaseSolver):
         self.par_group_settings: dict[str, dict[str, Any]] = par_group_settings
         self.add_tikhonov_reg: bool = add_tikhonov_reg
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
+
+        self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
+        self.vary_by_model = {} # pastas par vary bools for each model
+
+    def add_model(self, model):
+        self.remove_model(model)
+        self.models[model.name] = model
+        logger.info(f"Model: {model.name} added to solver.models")
+
+    def remove_model(self, model):
+        try:
+            self.models.pop(model.name)
+            logger.info(f"Model: {model.name} removed from solver.models")
+        except KeyError as e:
+            logger.info(f"Model: {model.name} not in solver.models")
 
     @property
     def stressmodel_parameterisers(self) -> list:
@@ -160,42 +175,67 @@ class PestSolver(BaseSolver):
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         # observations
-        observations = self.ml.observations()
-        observations.name = "Observations"
-        observations.to_csv(self.model_ws / "simulation.csv")
-        copy_file(self.model_ws / "simulation.csv", self.temp_ws)
-        self.observations = observations
+        obs_list = []
+        for ml_name, ml in self.models.items():
+            observations = ml.observations()
+            observations.name = "Observations"
+            obs_file = self.model_ws / f"simulation_{ml_name}.csv"
+            observations.to_csv(obs_file)
+            copy_file(obs_file, self.temp_ws)
+            observations = observations.to_frame()
+            observations.loc[:, "model_name"] = ml_name
+            obs_list.append(observations.copy())
+        self.observations = pd.concat(obs_list, ignore_index=True)
+        self.observations.index.name = "date"
 
         # setup parameters
-        self.ml.parameters.loc[:, "optimal"] = self.ml.parameters.loc[:, "initial"]
-        self.vary = self.ml.parameters.vary.values.astype(bool)
-        parameters = self.ml.parameters[self.vary].copy()
-        parameters.index = [
-            p.replace("_A", "_g") if p.endswith("_A") else p for p in parameters.index
-        ]
+        pars_list = []
+        self.vary = []
+        for ml_idx, (ml_name, ml) in enumerate(self.models.items()):
+            ml.parameters.loc[:, "optimal"] = ml.parameters.loc[:, "initial"]
+            self.vary_by_model[ml_name] = list(ml.parameters.vary.values.astype(bool))
+            self.vary += self.vary_by_model[ml_name]
+            parameters = ml.parameters[self.vary_by_model[ml_name]].copy()
+            parameters.index = [
+                p.replace("_A", "_g") if p.endswith("_A") else p for p in parameters.index
+            ]
+            parameters.index.name = "parnames"
+            if "constant_d" in parameters.index:
+                if np.isnan(parameters.at["constant_d", "pmin"]):
+                    ml.set_parameter(
+                        "constant_d",
+                        pmin=np.min(observations.values) - np.std(observations.values),
+                    )
+                if np.isnan(parameters.at["constant_d", "pmax"]):
+                    ml.set_parameter(
+                        "constant_d",
+                        pmax=np.max(observations.values) + np.std(observations.values),
+                    )
+            else:
+                ml.settings["fit_constant"] = False
+            parameters["model_name"] = ml_name
+            # define pmin/pmax from pastas model for pst in setup_files below
+            parameters["pmin"] = ml.parameters.loc[
+                self.vary_by_model[ml_name], "pmin"
+            ].values
+            parameters["pmax"] = ml.parameters.loc[
+                self.vary_by_model[ml_name], "pmax"
+            ].values
+            parameters.index = [f"m{str(ml_idx).zfill(2)}{p}" for p in parameters.index]
+            pars_list.append(parameters.copy())
+        parameters = pd.concat(pars_list, ignore_index=False)
         parameters.index.name = "parnames"
-        if "constant_d" in parameters.index:
-            if np.isnan(parameters.at["constant_d", "pmin"]):
-                self.ml.set_parameter(
-                    "constant_d",
-                    pmin=np.min(observations.values) - np.std(observations.values),
-                )
-            if np.isnan(parameters.at["constant_d", "pmax"]):
-                self.ml.set_parameter(
-                    "constant_d",
-                    pmax=np.max(observations.values) + np.std(observations.values),
-                )
-        else:
-            self.ml.settings["fit_constant"] = False
-
         par_sel = parameters.loc[:, ["optimal"]]
         par_sel.to_csv(self.model_ws / "parameters_sel.csv")
         copy_file(self.model_ws / "parameters_sel.csv", self.temp_ws)
         self.par_sel = par_sel
+        self.parameters = parameters
 
         # model
-        self.ml.to_file(self.model_ws / "model.pas")
-        copy_file(self.model_ws / "model.pas", self.temp_ws)
+        for ml_idx, (ml_name, ml) in enumerate(self.models.items()):
+            ml_file = self.model_ws / f"model_{str(ml_idx).zfill(2)}.pas"
+            self.models[ml_name].to_file(ml_file)
+            copy_file(ml_file, self.temp_ws)
 
     def write_pst(self, pst: pyemu.Pst, version: int = 2) -> None:
         """Write pest control file
@@ -237,12 +277,12 @@ class PestSolver(BaseSolver):
 
         # save pastas.model parameter and observation index for going back and forth between pastas and pest names
         self.parameter_index = dict(
-            zip(pf_pars.index, self.ml.parameters[self.vary].index)
+            zip(pf_pars.index, self.par_sel.index) #self.ml.parameters[self.vary].index)
         )
         # and for translating from pastas model parameter names to pest names
         self.ml_parname_to_pst = dict(
             zip(self.parameter_index.values(), self.parameter_index.keys())
-        )
+        ) # to be updated below with stressmodel_parameteriser pars
 
         # add custom stressmodel parameters
         if self.stressmodel_parameterisers:
@@ -274,11 +314,12 @@ class PestSolver(BaseSolver):
                 )
 
         # observations and simulation
-        self.pf.add_observations(
-            "simulation.csv",
-            index_cols=[self.observations.index.name],
-            use_cols=[self.observations.name],
-        )
+        for ml_name, ml in self.models.items():
+            self.pf.add_observations(
+                f"simulation_{ml_name}.csv",
+                index_cols=[self.observations.loc[self.observations.model_name==ml_name].index.name],
+                use_cols=["Observations"],
+            )
 
         # python scripts to run
         self.pf.add_py_function(self.run_function, "run()", is_pre_cmd=None)
@@ -289,10 +330,10 @@ class PestSolver(BaseSolver):
 
         # pastas model parameter bounds
         pastas_pars_mask = pst.parameter_data.index.isin(pastas_ml_pars.values)
-        pst.parameter_data.loc[pastas_pars_mask, ["parlbnd"]] = self.ml.parameters.loc[
+        pst.parameter_data.loc[pastas_pars_mask, ["parlbnd"]] = self.parameters.loc[
             self.vary, "pmin"
         ].values
-        pst.parameter_data.loc[pastas_pars_mask, ["parubnd"]] = self.ml.parameters.loc[
+        pst.parameter_data.loc[pastas_pars_mask, ["parubnd"]] = self.parameters.loc[
             self.vary, "pmax"
         ].values
 
@@ -387,8 +428,8 @@ class PestSolver(BaseSolver):
         with (self.temp_ws / "parameter_index.json").open("w") as f:
             json.dump(obj=self.parameter_index, fp=f, default=str)
         self.observation_index = dict(
-            zip(pst.observation_data.index, self.ml.observations().index)
-        )
+            zip(pst.observation_data.index, self.observations.index)
+        ) # not sure this is kosher with multi models cals - same dates repeated across models? But also not sure if this or the json below is even used...
         with (self.temp_ws / "observation_index.json").open("w") as f:
             json.dump(obj=self.observation_index, fp=f, default=str)
 
