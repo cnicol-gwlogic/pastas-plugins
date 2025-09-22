@@ -1,4 +1,5 @@
 import pyemu
+from pandas import DataFrame
 from pastas import Model
 
 
@@ -59,8 +60,10 @@ def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
-    ml: Model,  # ml_dict: dict,
+    #ml: Model,  # ml_dict: dict,
+    models: dict,
     parameter_index: dict,
+    observation_index: DataFrame,
     stressmodel_parameterisers: list = [],
 ) -> None:
     from logging import getLogger
@@ -69,6 +72,7 @@ def run_pypestworker(
         BaseParameteriser,
         WellModelParameteriser,
     )
+    from pandas import concat
 
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,
@@ -80,22 +84,23 @@ def run_pypestworker(
     # load pastas model
     # ml = _load_model(ml_dict)  # load_model(ml_file)
 
+    pvals = ppw.get_parameters()
+    if pvals is None:
+        return None
+
     # reactivate the model logger - it was deactivated before provision
     # as an arg to this module.
     # (multiprocesing uses pickling (of ml in this case), and pickle
     # can't pickle open file handle logger instances)
-    ml.logger = getLogger(ml.__name__)
-
-    pvals = ppw.get_parameters()
-    if pvals is None:
-        return None
+    #ml.logger = getLogger(ml.name)
 
     while True:
         # update standard pastas model parameters
         for pname, val in pvals.items():
             pname = parameter_index[pname]
-            if pname in ml.parameters.keys():
-                ml.set_parameter(pname, optimal=val)
+            for ml_name,ml in models.items():
+                if pname in ml.parameters.keys():
+                    ml.set_parameter(pname, optimal=val)
         # update custom stressmodel parameters
         for sm_p in stressmodel_parameterisers:
             sm_p_parnames = sm_p.stress_pars.parnme
@@ -105,17 +110,26 @@ def run_pypestworker(
             interp_kwargs["updated_sourcevals"] = new_par_values
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
             # update stress TimeSeries
-            smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-            for stress_series in smodel.stress:
-                if stress_series in sm_p.stress_names:
-                    stress_series.series_original = updated_stress_df.loc[
-                        :, stress_series.name
-                    ]
+            for ml_name,ml in models.items():
+                smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+                for stress_series in smodel.stress:
+                    if stress_series in sm_p.stress_names:
+                        stress_series.series_original = updated_stress_df.loc[
+                            :, stress_series.name
+                        ]
 
-        sim = ml.simulate()
-        obsvals = sim.loc[ml.observations().index]
-        obsvals.index = ppw._pst.observation_data.index
+        obsvals_list = []
+        for ml_name,ml in models.items():
+            ml.settings["tmin"] = None
+            ml.settings["tmax"] = None
+            sim = ml.simulate()
+            obsvals = sim.loc[ml.observations().index]
+            onames = observation_index.loc[observation_index.model_name==ml.name].obsnme
+            obsvals.index = onames
+            obsvals_list.append(obsvals)
+        obsvals = concat(obsvals_list, axis=0, ignore_index=False)
         ppw.send_observations(obsvals=obsvals)
+
         pvals = ppw.get_parameters()
         if pvals is None:
             break

@@ -445,7 +445,7 @@ class BaseParameteriser(ABC):
         updated_source_stresses : DataFrame | Series
             Stressmodel stress TimeSeries. Series if a single stress, DataFrame if multiple (eg WellModel)
         """
-        if not updated_sourcevals:  # non-pypestworker call (worker dirs on disk)
+        if updated_sourcevals is None:  # non-pypestworker call (worker dirs on disk)
             sourcevals = pd.read_csv(
                 self.modelfile,
                 index_col=["column_names", "Datetime"],
@@ -453,22 +453,21 @@ class BaseParameteriser(ABC):
                 date_format=self.date_format,
             )  # read pest-updated values from disk
         else:  # pypestworker call - updated values from series (parnme:value) in memory
-            if not self.solver.longnames:
+            """if not self.solver.long_names:
                 raise Exception(
-                    f"PestSolver.longnames must be True for {self._name}.interpolate_stress.updated_sourcevals to work as currently coded.\n \
+                    f"PestSolver.long_names must be True for {self._name}.interpolate_stress.updated_sourcevals to work as currently coded.\n \
                                 Hence Pest_HP solver is not yet supported with this function."
-                )  # see TODO note above for a possible solution.
+                )  # see TODO note above for a possible solution."""
             sourcevals = self.modelfile_df_org.copy()
+            sourcevals.loc[:, "value"] = updated_sourcevals # this should already be indexed by parnme in forward run, so in order
             # self.stress_pars (returned pstfrom() df) has usecol and parnme in it? We could use that (better than reading from disk). <--see self.parnme_indexer
-            for krig_col, df in sourcevals.groupby(level="column_names"):
+            """for krig_col, df in sourcevals.groupby(level="column_names"):
                 parnames = self.stress_pars.loc[
-                    self.stress_pars.column_names == krig_col
+                    self.stress_pars.index.get_level_values("column_names") == krig_col
                 ].parnme
                 # usecols = self.parnme_indexer.loc[parnames].column_names
                 indexer = self.parnme_indexer.loc[parnames].indices  # Datetime
-                sourcevals.loc[[krig_col, indexer], "value"] = updated_sourcevals.loc[
-                    parnames
-                ].values
+                sourcevals.loc[[krig_col, indexer], "value"] = updated_sourcevals"""
 
         krig_cols = self.stress_names
         source_stresses = self.stress.copy()  # crosstab with columns of stressmodel rate timeseries (per bore). Index is datetime
@@ -545,6 +544,45 @@ class BaseParameteriser(ABC):
 
         return updated_source_stresses  # self.stress #self.stressmodel.stress
 
+    def add_stress_obs(
+            self,
+            obs_data : Series = None,
+
+    ) -> None:
+        """
+        Add observations of stress rates for pest.
+
+        Parameters
+        ----------
+        obs_data : Optional[Series]
+            Observed stress value data points. Indexed by datetime.
+
+        Returns
+        -------
+        None
+        """
+
+        self.obs_data = obs_data
+
+    def _mod2obs(self) -> DataFrame:
+        """
+        Internal method to intrpolate modelled stress rates to observed datetimes.
+        """
+        # define interp function: stressmodel stress rates to obs data datetimes
+        # insert obs indices --> interp(linear) -->keep only obs dts
+        new_idx = self.stress.index.union(self.obs_data.index, sort=True)
+        modobs = self.stress.reindex(new_idx).melt(
+                var_name="column_names", ignore_index=False
+            ).groupby(by="column_names").apply(
+            lambda x: x.interpolate(method='linear')
+        )
+        modobs = modobs.loc[self.obs_data.index].reset_index(
+            drop=False
+        ).set_index(
+            ["Datetime","column_names"]
+        )
+
+        return modobs
 
 class WellModelParameteriser(BaseParameteriser):
     """
@@ -869,5 +907,5 @@ class WellModelParameteriser(BaseParameteriser):
 
         # and save a copy of self.modelfile data in memory for pypestworker updates
         self.modelfile_df_org = pd.read_csv(
-            self.modelfile, index_col=0, date_format=self.date_format
+            self.modelfile, index_col=[1,0], date_format=self.date_format
         )

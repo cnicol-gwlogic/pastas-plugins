@@ -101,6 +101,7 @@ class PestSolver(BaseSolver):
             logger = logging.getLogger(__name__)
 
         BaseSolver.__init__(self, pcov=pcov, nfev=nfev, **kwargs)
+        self.long_names = long_names
         # model workspace (for pastas files)
         self.model_ws = Path(model_ws).resolve()
         if not self.model_ws.exists():
@@ -279,6 +280,7 @@ class PestSolver(BaseSolver):
         self.parameter_index = dict(
             zip(pf_pars.index, self.par_sel.index) #self.ml.parameters[self.vary].index)
         )
+        
         # and for translating from pastas model parameter names to pest names
         self.ml_parname_to_pst = dict(
             zip(self.parameter_index.values(), self.parameter_index.keys())
@@ -296,10 +298,11 @@ class PestSolver(BaseSolver):
                 with open(fname, "wb") as f:
                     dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
+                parnmes = sm_p.source_points.parnme.values
                 self.parameter_index.update(
                     dict(
                         zip(
-                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                            parnmes, #sm_p.stress_pars.index.to_frame().iloc[:, 0],
                             sm_p.stress_pars.index.to_frame().iloc[:, 0],
                         )
                     )
@@ -308,7 +311,7 @@ class PestSolver(BaseSolver):
                     dict(
                         zip(
                             sm_p.stress_pars.index.to_frame().iloc[:, 0],
-                            sm_p.stress_pars.index.to_frame().iloc[:, 0],
+                            parnmes, #sm_p.stress_pars.index.to_frame().iloc[:, 0],
                         )
                     )
                 )
@@ -427,11 +430,19 @@ class PestSolver(BaseSolver):
 
         with (self.temp_ws / "parameter_index.json").open("w") as f:
             json.dump(obj=self.parameter_index, fp=f, default=str)
-        self.observation_index = dict(
-            zip(pst.observation_data.index, self.observations.index)
-        ) # not sure this is kosher with multi models cals - same dates repeated across models? But also not sure if this or the json below is even used...
-        with (self.temp_ws / "observation_index.json").open("w") as f:
-            json.dump(obj=self.observation_index, fp=f, default=str)
+        #self.observation_index = dict(
+        #    zip(pst.observation_data.index, self.observations.index)
+        #) # not sure this is kosher with multi models cals - same dates repeated across models? But also not sure if this or the json below is even used...
+        self.observation_index = pd.DataFrame(
+            {
+                "obsnme": pst.observation_data.index.values,
+                "model_name": self.observations.model_name.values
+            }
+        )
+        self.observation_index.to_csv("tmp.obsidx.csv")
+        self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
+        #with (self.temp_ws / "observation_index.json").open("w") as f:
+        #    json.dump(obj=self.observation_index, fp=f, default=str)
 
     def run(self, arg_str: str = "", silent: bool = False):
         pyemu.os_utils.run(
@@ -979,8 +990,9 @@ class PestIesSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
+                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
+                "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
             if self.use_pypestworker
