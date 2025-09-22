@@ -458,8 +458,9 @@ class BaseParameteriser(ABC):
                     f"PestSolver.long_names must be True for {self._name}.interpolate_stress.updated_sourcevals to work as currently coded.\n \
                                 Hence Pest_HP solver is not yet supported with this function."
                 )  # see TODO note above for a possible solution."""
-            sourcevals = self.modelfile_df_org.copy()
+            sourcevals = self.modelfile_df_org.reset_index(drop=False).set_index("parnme")
             sourcevals.loc[:, "value"] = updated_sourcevals # this should already be indexed by parnme in forward run, so in order
+            sourcevals = sourcevals.reset_index(drop=False).set_index(["column_names","Datetime"])
             # self.stress_pars (returned pstfrom() df) has usecol and parnme in it? We could use that (better than reading from disk). <--see self.parnme_indexer
             """for krig_col, df in sourcevals.groupby(level="column_names"):
                 parnames = self.stress_pars.loc[
@@ -475,9 +476,9 @@ class BaseParameteriser(ABC):
         if method == "step":
             source_stresses.loc[:, krig_cols] = np.nan
             for krig_col in krig_cols:
-                source_stresses.loc[:, krig_cols] = sourcevals.xs(krig_col)
-                source_stresses.loc[:, krig_cols] = (
-                    source_stresses.loc[:, krig_cols].ffill().bfill()
+                source_stresses.loc[:, krig_col] = sourcevals.xs(krig_col).loc[:,"value"]
+                source_stresses.loc[:, krig_col] = (
+                    source_stresses.loc[:, krig_col].ffill().bfill()
                 )
         else:  # kriging or ipd interpolation over time required.
             # In hindsight, kriging won't work with pypestworker because krige_using_file requires a file...not in memory.
@@ -522,7 +523,7 @@ class BaseParameteriser(ABC):
                     func,
                     sourceval=sourcevals.xs(
                         krig_col
-                    ).values,  # not right - we need to filter sourcevals from parnames per "column_names" (stress name)
+                    ).loc[:,"value"].values,
                     targval_min=targval_min,
                     targval_max=targval_max,
                     kwargs_pputils=kwargs_pputils,
@@ -909,3 +910,4 @@ class WellModelParameteriser(BaseParameteriser):
         self.modelfile_df_org = pd.read_csv(
             self.modelfile, index_col=[1,0], date_format=self.date_format
         )
+        self.modelfile_df_org["parnme"] = self.source_points.parnme

@@ -186,7 +186,7 @@ class PestSolver(BaseSolver):
             observations = observations.to_frame()
             observations.loc[:, "model_name"] = ml_name
             obs_list.append(observations.copy())
-        self.observations = pd.concat(obs_list, ignore_index=True)
+        self.observations = pd.concat(obs_list, ignore_index=False)
         self.observations.index.name = "date"
 
         # setup parameters
@@ -436,9 +436,10 @@ class PestSolver(BaseSolver):
         self.observation_index = pd.DataFrame(
             {
                 "obsnme": pst.observation_data.index.values,
-                "model_name": self.observations.model_name.values
+                "model_name": self.observations.model_name.values,
+                "date": self.observations.index.values,
             }
-        )
+        ).set_index(["model_name","date"])
         self.observation_index.to_csv("tmp.obsidx.csv")
         self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
         #with (self.temp_ws / "observation_index.json").open("w") as f:

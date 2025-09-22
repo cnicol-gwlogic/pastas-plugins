@@ -41,7 +41,7 @@ def run() -> None:
         for ml in models:
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
             for stress_series in smodel.stress:
-                if stress_series in sm_p.stress_names:
+                if stress_series.name in sm_p.stress_names:
                     stress_series.series_original = updated_stress_df.loc[
                         :, stress_series.name
                     ]
@@ -95,12 +95,6 @@ def run_pypestworker(
     #ml.logger = getLogger(ml.name)
 
     while True:
-        # update standard pastas model parameters
-        for pname, val in pvals.items():
-            pname = parameter_index[pname]
-            for ml_name,ml in models.items():
-                if pname in ml.parameters.keys():
-                    ml.set_parameter(pname, optimal=val)
         # update custom stressmodel parameters
         for sm_p in stressmodel_parameterisers:
             sm_p_parnames = sm_p.stress_pars.parnme
@@ -109,24 +103,47 @@ def run_pypestworker(
             interp_kwargs = sm_p.interp_kwargs
             interp_kwargs["updated_sourcevals"] = new_par_values
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
-            # update stress TimeSeries
-            for ml_name,ml in models.items():
-                smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-                for stress_series in smodel.stress:
-                    if stress_series in sm_p.stress_names:
-                        stress_series.series_original = updated_stress_df.loc[
-                            :, stress_series.name
-                        ]
 
         obsvals_list = []
         for ml_name,ml in models.items():
             ml.settings["tmin"] = None
             ml.settings["tmax"] = None
+            # update standard pastas model parameters
+            """pvals.to_csv(f"{ml.name}.{ppw.net_pack.runid}.pvals.temp.csv")
+            updated_stress_df.to_csv(f"{ml.name}.{ppw.net_pack.runid}.updated_stress_df.temp.csv")"""
+            for pname, val in pvals.items():
+                pname = parameter_index[pname]
+                pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
+                if pname[3:] in ml.parameters.index.values:
+                    ml.set_parameter(pname[3:], optimal=val)
+            # update stress TimeSeries
+            for sm_p in stressmodel_parameterisers:
+                smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+                for stress_series in smodel.stress:
+                    if stress_series.name in sm_p.stress_names:
+                        stress_series.series_original = updated_stress_df.loc[
+                            :, stress_series.name
+                        ]
+                        """ml.stressmodels[
+                            sm_p.stressmodel_name
+                        ].stress[idx].series_original = updated_stress_df.loc[
+                            :, stress_series.name
+                        ]"""
             sim = ml.simulate()
-            obsvals = sim.loc[ml.observations().index]
-            onames = observation_index.loc[observation_index.model_name==ml.name].obsnme
+            obs = observation_index.xs(ml.name) # xs-->df indexed by date. Values are just obsnme
+            obsvals = sim.loc[obs.index.values]
+            onames = obs.obsnme
             obsvals.index = onames
             obsvals_list.append(obsvals)
+
+            """"# TEMP WORK TO DELETE
+            for sm_p in stressmodel_parameterisers:
+                smodel = ml.stressmodels.get(sm_p.stressmodel_name)
+                run_id = ppw.net_pack.runid
+                smodel.get_stress(squeeze=False).to_csv(f"{ml.name}.{run_id}.{sm_p.stressmodel_name}.temp.csv")
+                sm_p.modelfile_df_org.to_csv(f"{ml.name}.{run_id}.{sm_p.stressmodel_name}.modelfile_df_org.temp.csv")
+            ml.parameters.to_csv(f"{ml.name}.{run_id}.pastas_pars.temp.csv")"""
+
         obsvals = concat(obsvals_list, axis=0, ignore_index=False)
         ppw.send_observations(obsvals=obsvals)
 
