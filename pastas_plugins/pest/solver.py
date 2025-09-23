@@ -175,6 +175,8 @@ class PestSolver(BaseSolver):
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
+        if self.models == {}:
+            self.models[self.ml.name] = self.ml
         # observations
         obs_list = []
         for ml_name, ml in self.models.items():
@@ -188,6 +190,7 @@ class PestSolver(BaseSolver):
             obs_list.append(observations.copy())
         self.observations = pd.concat(obs_list, ignore_index=False)
         self.observations.index.name = "date"
+        observations = observations.Observations
 
         # setup parameters
         pars_list = []
