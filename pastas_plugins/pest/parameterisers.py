@@ -631,6 +631,11 @@ class WellModelParameteriser(BaseParameteriser):
         Assigned to nearest pilot point in time to Datetime (depends on par_freq).
         Bounds will be used to define interpolation and covariance sill value (variance) by dividing par range
         by 4.0 and squaring that (95%CI assumed); that variance overrides t_variogram_sill if par_bounds is provided.
+    stress_minmax_dates : NOT USED ANYMORE TODO: REMOVE Optional[DataFrame| None]
+        Dataframe indexed by stressmodel stress TimeSeries name (bore), with columns of min_date and max_date for
+        non-zero stress values. min_date and max_date can contain null (NaT) values, in which case min and max dates
+        for non-zero stress values are set to the min/max date of the stressmodel stresses. Stress parameters outside
+        of this date range are fixed at zero.
 
     Attributes
     ----------
@@ -664,6 +669,7 @@ class WellModelParameteriser(BaseParameteriser):
         max_vario_range: Optional[float] = 730.0,
         t_variogram_sill: float = 1.0,
         par_bounds: Optional[DataFrame | None] = None,
+        #stress_minmax_dates: Optional[DataFrame | None] = None,
     ) -> None:
         BaseParameteriser.__init__(
             self,
@@ -691,6 +697,7 @@ class WellModelParameteriser(BaseParameteriser):
         self.t_variogram_sill = t_variogram_sill
         self.max_vario_range = max_vario_range
         self.par_bounds = par_bounds
+        #self.stress_minmax_dates = stress_minmax_dates
 
         # filter stress based on provided wellmodel_names
         self.stress = self.stress.filter(items=self.stress_names, axis="columns")
@@ -791,8 +798,7 @@ class WellModelParameteriser(BaseParameteriser):
             logger.error(f"Unsupported value for par_freq provided ({self.par_freq}).")
             raise Exception
 
-        # revert flow rate diffs to flow rates
-        source_points.index.name = "Datetime"  # does this work? should do now with df.melt(ignore_index=False) above
+        source_points.index.name = "Datetime" 
         source_points = source_points.reset_index(drop=False).set_index(
             ["column_names", "Datetime"]
         )
@@ -894,15 +900,31 @@ class WellModelParameteriser(BaseParameteriser):
         )
         self.source_points["parnme"] = self.stress_pars.parnme
 
-        # TODO: DEFINE/HANDLE RATE PAR BOUNDS
-        # Need a dict or df of stress TimeSeries name: ubnd/lbnd at a minimum.
-        # Probs need time field in there too, so maybe initial stress rates pilot points can be used,
-        # with user-supplied ubnd and lbnd factors of the initial rate. <- this is it
+        # Define rate parameter bounds
+        # self.par_bounds is a multiiindex df of [TimeSeries name, datetime]: stress parubnd/parlbnd.
         if self.par_bounds is not None:
-            self.stress_pars.loc[:, ["parlbnd", "parubnd"]] = self.par_bounds.loc[
-                :, ["parlbnd", "parubnd"]
+            self.stress_pars.loc[:, ["parval1","partrans","parlbnd", "parubnd"]] = self.par_bounds.loc[
+                :, ["parval1","partrans","parlbnd", "parubnd"]
             ]
 
+        """DON'T NEED THIS - USE PARBOUNDS INPUT INSTEAD 
+        if self.stress_minmax_dates is not None:
+            # filter out stresses not in stress_names (not parameterised)
+            self.stress_minmax_dates = self.stress_minmax_dates.loc[self.stress_names]
+            # fill nans with min/max stress date
+            self.stress_minmax_dates.loc[self.stress_minmax_dates.min_date.isna(), "min_date"] = self.stress.index.min()
+            self.stress_minmax_dates.loc[self.stress_minmax_dates.max_date.isna(), "max_date"] = self.stress.index.max()
+            self.stress_pars = self.stress_pars.merge(
+                self.stress_minmax_dates,
+                right_index=True,
+                left_on="column_names",
+                how="left",
+            )
+            mask = self.stress_pars.index.get_level_values("index_org") < self.stress_pars.min_date
+            mask = mask | (self.stress_pars.index.get_level_values("index_org") > self.stress_pars.max_date)
+            self.stress_pars.loc[mask,"partrans"] = "fixed"
+            self.stress_pars.loc[mask, "parval1"] = 0.0
+        """
         # make pcov for pilot points
         self._get_ppoint_cov(self.source_points)
 

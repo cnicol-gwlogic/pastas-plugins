@@ -347,11 +347,8 @@ class PestSolver(BaseSolver):
                     "index"
                 )
                 indexer = pst.parameter_data.loc[~pastas_pars_mask].index.values
-                pst.parameter_data.loc[~pastas_pars_mask, ["parlbnd"]] = (
-                    sm_p.stress_pars.loc[indexer].parlbnd
-                )
-                pst.parameter_data.loc[~pastas_pars_mask, ["parubnd"]] = (
-                    sm_p.stress_pars.loc[indexer].parubnd
+                pst.parameter_data.loc[~pastas_pars_mask, ["parval1","partrans","parlbnd","parubnd"]] = (
+                    sm_p.stress_pars.loc[indexer,["parval1","partrans","parlbnd","parubnd"]]
                 )
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
                     ["column_names", "index_org"]
