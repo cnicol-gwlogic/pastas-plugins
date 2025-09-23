@@ -55,6 +55,10 @@ def run() -> None:
         simulation = ml.simulate()
         simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv")
 
+        # save head_diffs too
+        head_diffs = simulation - simulation.loc[simulation.index.min()]
+        head_diffs.loc[ml.observations().index].to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv")
+
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
@@ -104,7 +108,15 @@ def run_pypestworker(
             interp_kwargs["updated_sourcevals"] = new_par_values
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
 
-        obsvals_list = []
+        obsvals_list, obs_diffs_list = [], []
+        head_obsgps = [
+            og for og in observation_index.index.get_level_values("obgnme").unique() \
+            if og.find("head_diff") < 0
+        ]
+        head_diff_obsgps = [
+            og for og in observation_index.index.get_level_values("obgnme").unique() \
+            if og.find("head_diff") >= 0
+        ]
         for ml_name,ml in models.items():
             ml.settings["tmin"] = None
             ml.settings["tmax"] = None
@@ -130,11 +142,25 @@ def run_pypestworker(
                             :, stress_series.name
                         ]"""
             sim = ml.simulate()
-            obs = observation_index.xs(ml.name) # xs-->df indexed by date. Values are just obsnme
+            obs = observation_index.xs(ml.name)
+            obs = obs.loc[obs.index.get_level_values("obgnme").isin(head_obsgps)].droplevel("obgnme") # xs-->df indexed by date. Values are just obsnme
             obsvals = sim.loc[obs.index.values]
+            # save head_diffs in case needed below (before we replace datetime index with obsnme index)
+            head_diffs = obsvals - obsvals.loc[obsvals.index.min()]
             onames = obs.obsnme
             obsvals.index = onames
             obsvals_list.append(obsvals)
+
+            # head difference from first head obs
+            if len(head_diff_obsgps) > 0:
+                obs_diffs = observation_index.xs(ml.name)  # xs-->df indexed by [obgnme,date]. Values are just obsnme
+                head_diff_obsgps2 = [og for og in head_diff_obsgps if og in obs_diffs.index.get_level_values("obgnme")]
+                obs_diffs = obs_diffs.loc[
+                    obs_diffs.index.get_level_values("obgnme").isin(head_diff_obsgps2)
+                ].droplevel("obgnme")  # -->df indexed by date. Values are just obsnme
+                onames = obs_diffs.obsnme
+                head_diffs.index = onames
+                obs_diffs_list.append(head_diffs)
 
             """"# TEMP WORK TO DELETE
             for sm_p in stressmodel_parameterisers:
@@ -145,7 +171,9 @@ def run_pypestworker(
             ml.parameters.to_csv(f"{ml.name}.{run_id}.pastas_pars.temp.csv")"""
 
         obsvals = concat(obsvals_list, axis=0, ignore_index=False)
-        ppw.send_observations(obsvals=obsvals)
+        obs_diffs = concat(obs_diffs_list, axis=0, ignore_index=False)
+        obsvals_all = concat([obsvals, obs_diffs], axis=0, ignore_index=False)
+        ppw.send_observations(obsvals=obsvals_all)
 
         pvals = ppw.get_parameters()
         if pvals is None:

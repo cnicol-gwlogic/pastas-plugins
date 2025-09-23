@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pyemu
 from numpy.typing import NDArray
-from pandas import DataFrame
+from pandas import DataFrame,Series
 from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
 from psutil import cpu_count
@@ -43,6 +43,7 @@ class PestSolver(BaseSolver):
         par_group_settings: Optional[dict[str, dict[str, Any]] | None] = None,
         add_tikhonov_reg: Optional[bool] = False,
         stressmodel_parameterisers: Optional[list | None] = None,
+        obs_diff_from_first: Optional[bool] = False,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -80,6 +81,8 @@ class PestSolver(BaseSolver):
             Default is False.
         stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.BaseParameteriser] | None, optional
             Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST. Default is None.
+        obs_diff_from_first : bool, optional
+            Option to calibrate to first head and subsequent differences from that. Default is False.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -126,6 +129,7 @@ class PestSolver(BaseSolver):
         self.par_group_settings: dict[str, dict[str, Any]] = par_group_settings
         self.add_tikhonov_reg: bool = add_tikhonov_reg
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
+        self.obs_diff_from_first: bool = obs_diff_from_first
 
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
@@ -173,24 +177,57 @@ class PestSolver(BaseSolver):
         Path("temp.unc").unlink()
         return unc_str
 
+    @staticmethod
+    def _get_obs_diff_from_first(observations: Series) -> DataFrame:
+        """Appends difference from first head obs to observations Series"""
+        observations["weight"] = 0.0
+        observations.loc[observations.index.min(),"obs_type"] = "first_head"
+        observations.loc[observations.index.min(), "weight"] = 1.0
+        diffs = observations.loc[observations.obs_type=="head"]
+        diffs.loc[:,"Observations"] -= observations.loc[observations.index.min(),"Observations"]
+        diffs.loc[:,"obs_type"] = "head_diff_from_first"
+        diffs.loc[:, "weight"] = 1.0
+        #observations = pd.concat([observations, diffs], ignore_index=False)
+        return observations, diffs
+
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         if self.models == {}:
             self.models[self.ml.name] = self.ml
         # observations
-        obs_list = []
+        obs_list, obs_diffs_list = [], []
         for ml_name, ml in self.models.items():
             observations = ml.observations()
             observations.name = "Observations"
-            obs_file = self.model_ws / f"simulation_{ml_name}.csv"
-            observations.to_csv(obs_file)
-            copy_file(obs_file, self.temp_ws)
             observations = observations.to_frame()
+            observations["obs_type"] = "head"
+            observations["weight"] = 1.0
+            if self.obs_diff_from_first:
+                observations, obs_diffs = self._get_obs_diff_from_first(observations)
+                obs_diff_file = self.model_ws / f"simulation_head_diffs_{ml_name}.csv"
+                obs_diffs.Observations.to_csv(obs_diff_file)
+                copy_file(obs_diff_file, self.temp_ws)
+                obs_diffs.loc[:, "model_name"] = ml_name
+                obs_diffs_list.append(obs_diffs.copy())
+            obs_file = self.model_ws / f"simulation_{ml_name}.csv"
+            observations.Observations.to_csv(obs_file)
+            copy_file(obs_file, self.temp_ws)
             observations.loc[:, "model_name"] = ml_name
             obs_list.append(observations.copy())
         self.observations = pd.concat(obs_list, ignore_index=False)
         self.observations.index.name = "date"
-        observations = observations.Observations
+        if self.obs_diff_from_first:
+            self.obs_diffs = pd.concat(obs_diffs_list, ignore_index=False)
+            self.obs_diffs.index.name = "date"
+            ml_obs_list = [] # we do this to re-order as pst_from.add_observations is called to build the pst file
+            for ml_name, ml in self.models.items():
+                ml_obs_list.append(
+                    pd.concat(
+                        [self.observations.loc[self.observations.model_name == ml_name],
+                        self.obs_diffs.loc[self.obs_diffs.model_name == ml_name]],
+                        ignore_index=False)
+                )
+            self.observations = pd.concat(ml_obs_list, ignore_index=False)
 
         # setup parameters
         pars_list = []
@@ -205,6 +242,9 @@ class PestSolver(BaseSolver):
             ]
             parameters.index.name = "parnames"
             if "constant_d" in parameters.index:
+                heads_mask = self.observations.model_name == ml_name
+                heads_mask = heads_mask & self.observations.obs_type == "head"
+                observations = self.observations.Observations.loc[heads_mask]
                 if np.isnan(parameters.at["constant_d", "pmin"]):
                     ml.set_parameter(
                         "constant_d",
@@ -319,13 +359,25 @@ class PestSolver(BaseSolver):
                     )
                 )
 
-        # observations and simulation
+        # observations
         for ml_name, ml in self.models.items():
+            # usual head obs
+            obsgp = f"head_{ml_name}"
             self.pf.add_observations(
                 f"simulation_{ml_name}.csv",
-                index_cols=[self.observations.loc[self.observations.model_name==ml_name].index.name],
+                index_cols=[self.observations.index.name],
                 use_cols=["Observations"],
+                obsgp=obsgp,
             )
+            # head diffs from first if requested
+            if self.obs_diff_from_first:
+                obsgp = f"head_diff_{ml_name}"
+                self.pf.add_observations(
+                    f"simulation_head_diffs_{ml_name}.csv",
+                    index_cols=[self.obs_diffs.index.name],
+                    use_cols=["Observations"],
+                    obsgp=obsgp,
+                )
 
         # python scripts to run
         self.pf.add_py_function(self.run_function, "run()", is_pre_cmd=None)
@@ -333,6 +385,33 @@ class PestSolver(BaseSolver):
 
         # create control file
         pst = self.pf.build_pst(self.pf.new_d / "pest.pst", version=version)
+
+        # obs weights
+        hmask = pst.observation_data.obgnme.str.find("head") >= 0
+        dmask = pst.observation_data.obgnme.str.find("head_diff") >= 0
+        hmask = hmask & ~dmask
+        pst.observation_data.loc[hmask, "weight"] = 1.0
+        if self.obs_diff_from_first:
+            pst.observation_data.loc[dmask, "weight"] = 1.0
+            pst.observation_data.loc[~dmask, "weight"] = 0.0
+            pst.observation_data.loc[
+                :, "head_min_date"
+            ] = pst.observation_data.loc[
+                :, ["obgnme","date"]
+            ].groupby(by="obgnme").transform("min")
+            first_head_mask = pst.observation_data.head_min_date == pst.observation_data.date
+            first_head_mask = first_head_mask & hmask
+            hobsgp_weights = pst.observation_data.loc[hmask,["obgnme","weight"]].groupby(by="obgnme").count()
+            hobsgp_weights = hobsgp_weights.rename(columns={"weight": "n_head_obs"})
+            first_head_weight_factor = 0.5 # this is totally subjective, up to user. ?TODO: add user param for this?
+            pst.observation_data.loc[first_head_mask, "weight"] = first_head_weight_factor * pst.observation_data.loc[
+                first_head_mask
+            ].merge(
+                hobsgp_weights, left_on="obgnme", right_index=True, how="left"
+            ).n_head_obs
+            pst.observation_data.loc[first_head_mask, "obgnme"] = pst.observation_data.loc[
+                first_head_mask, "obgnme"
+            ].apply(lambda x: f"first_{x}")
 
         # pastas model parameter bounds
         pastas_pars_mask = pst.parameter_data.index.isin(pastas_ml_pars.values)
@@ -438,12 +517,10 @@ class PestSolver(BaseSolver):
                 "obsnme": pst.observation_data.index.values,
                 "model_name": self.observations.model_name.values,
                 "date": self.observations.index.values,
+                "obgnme": pst.observation_data.obgnme.values,
             }
-        ).set_index(["model_name","date"])
-        self.observation_index.to_csv("tmp.obsidx.csv")
+        ).set_index(["model_name","obgnme","date"])
         self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
-        #with (self.temp_ws / "observation_index.json").open("w") as f:
-        #    json.dump(obj=self.observation_index, fp=f, default=str)
 
     def run(self, arg_str: str = "", silent: bool = False):
         pyemu.os_utils.run(
