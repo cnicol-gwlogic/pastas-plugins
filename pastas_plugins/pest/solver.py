@@ -438,7 +438,7 @@ class PestSolver(BaseSolver):
             pass
 
         # pastas model parameter bounds
-        pastas_pars_mask = pst.parameter_data.index.isin(pastas_ml_pars.values)
+        pastas_pars_mask = pst.parameter_data.longname.isin(pastas_ml_pars.values)
         pst.parameter_data.loc[pastas_pars_mask, ["parlbnd"]] = self.parameters.loc[
             self.vary, "pmin"
         ].values
@@ -452,10 +452,10 @@ class PestSolver(BaseSolver):
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
                     "index"
                 )
-                indexer = pst.parameter_data.loc[~pastas_pars_mask].index.values
+                indexer = pst.parameter_data.loc[~pastas_pars_mask].longname.values
                 pst.parameter_data.loc[~pastas_pars_mask, ["parval1","partrans","parlbnd","parubnd"]] = (
                     sm_p.stress_pars.loc[indexer,["parval1","partrans","parlbnd","parubnd"]]
-                )
+                ).values # need .values for hp / shortnames cases -> index comparison differs in that case (note longname rather than index in indexer above)
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
                     ["column_names", "index_org"]
                 )
@@ -734,8 +734,9 @@ class PestGlmSolver(PestSolver):
                 if self.use_pypestworker
                 else None,  # the function to run in the agent
                 ppw_kwargs={
-                    "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
+                    "models": self.models,  # "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                     "parameter_index": self.parameter_index,
+                    "observation_index": self.observation_index,
                     "stressmodel_parameterisers": self.stressmodel_parameterisers,
                 }
                 if self.use_pypestworker
@@ -875,9 +876,6 @@ class PestHpSolver(PestSolver):
         """
         self.setup_model()
         self.setup_files(version=1)
-        if self.use_pypestworker:
-            ml_pklr = deepcopy(self.ml)
-            ml_pklr.logger = None
         pyemu.os_utils.start_workers(
             worker_dir=self.temp_ws,  # the folder which contains the "template" PEST dataset
             exe_rel_path=self.exe_name.name,  # the PEST software version we want to run
@@ -893,8 +891,9 @@ class PestHpSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
+                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
+                "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
             }
             if self.use_pypestworker
