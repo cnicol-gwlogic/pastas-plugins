@@ -43,7 +43,11 @@ class PestSolver(BaseSolver):
         par_group_settings: Optional[dict[str, dict[str, Any]] | None] = None,
         add_tikhonov_reg: Optional[bool] = False,
         stressmodel_parameterisers: Optional[list | None] = None,
-        obs_diff_from_first: Optional[bool] = False,
+        obs_diff: Optional[bool] = False,
+        phi_factors: Optional[dict] = {
+            "headdiff_": 0.85,
+            "head_": 0.15,
+        },
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -81,8 +85,8 @@ class PestSolver(BaseSolver):
             Default is False.
         stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.BaseParameteriser] | None, optional
             Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST. Default is None.
-        obs_diff_from_first : bool, optional
-            Option to calibrate to first head and subsequent differences from that. Default is False.
+        obs_diff : bool, optional
+            Option to calibrate to head differences from previous head. Default is False.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -129,7 +133,8 @@ class PestSolver(BaseSolver):
         self.par_group_settings: dict[str, dict[str, Any]] = par_group_settings
         self.add_tikhonov_reg: bool = add_tikhonov_reg
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
-        self.obs_diff_from_first: bool = obs_diff_from_first
+        self.obs_diff: bool = obs_diff
+        self.phi_factors: dict = phi_factors
 
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
@@ -178,17 +183,15 @@ class PestSolver(BaseSolver):
         return unc_str
 
     @staticmethod
-    def _get_obs_diff_from_first(observations: Series) -> DataFrame:
-        """Appends difference from first head obs to observations Series"""
-        observations["weight"] = 0.0
-        observations.loc[observations.index.min(),"obs_type"] = "first_head"
-        observations.loc[observations.index.min(), "weight"] = 1.0
-        diffs = observations.loc[observations.obs_type=="head"]
-        diffs.loc[:,"Observations"] -= observations.loc[observations.index.min(),"Observations"]
-        diffs.loc[:,"obs_type"] = "head_diff_from_first"
+    def _get_obs_diff(observations: Series) -> DataFrame:
+        """Returns difference from previous head obs Series"""
+        mask = observations.obs_type=="head"
+        diffs = observations.loc[mask].copy()
+        diffs.loc[:, "Observations"] = diffs.Observations - diffs.Observations.shift().values
+        diffs.dropna(subset=["Observations"], inplace=True)
+        diffs.loc[:,"obs_type"] = "headdiff"
         diffs.loc[:, "weight"] = 1.0
-        #observations = pd.concat([observations, diffs], ignore_index=False)
-        return observations, diffs
+        return diffs
 
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
@@ -202,8 +205,8 @@ class PestSolver(BaseSolver):
             observations = observations.to_frame()
             observations["obs_type"] = "head"
             observations["weight"] = 1.0
-            if self.obs_diff_from_first:
-                observations, obs_diffs = self._get_obs_diff_from_first(observations)
+            if self.obs_diff:
+                obs_diffs = self._get_obs_diff(observations)
                 obs_diff_file = self.model_ws / f"simulation_head_diffs_{ml_name}.csv"
                 obs_diffs.Observations.to_csv(obs_diff_file)
                 copy_file(obs_diff_file, self.temp_ws)
@@ -216,7 +219,7 @@ class PestSolver(BaseSolver):
             obs_list.append(observations.copy())
         self.observations = pd.concat(obs_list, ignore_index=False)
         self.observations.index.name = "date"
-        if self.obs_diff_from_first:
+        if self.obs_diff:
             self.obs_diffs = pd.concat(obs_diffs_list, ignore_index=False)
             self.obs_diffs.index.name = "date"
             ml_obs_list = [] # we do this to re-order as pst_from.add_observations is called to build the pst file
@@ -293,6 +296,31 @@ class PestSolver(BaseSolver):
         """
         pst.write(self.pf.new_d / "pest.pst", version=version)
 
+    def _update_observations_names(
+            self,
+            ml_name: str,
+            obs_types: list,
+    ) -> None:
+        """
+        Add pest obsnme and obgnme to self.observations dataframe. Designed to be called
+        immediately after each self.pf.add_observations() call
+        """
+        tmp_obs = self.pf.obs_dfs[-1].assign(
+            date=self.pf.obs_dfs[-1].obsnme.apply(
+                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format="%Y-%m-%d"))
+        )
+        omask = (self.observations.model_name == ml_name) & \
+                (self.observations.obs_type.isin(obs_types))
+        join_obs = self.observations.loc[omask]
+        try:
+            join_obs = join_obs.drop(columns=["obsnme","obgnme"])
+        except: # if the cols don't exist (on first use of this function) we get an exception
+            pass
+        self.observations.loc[omask, ["obsnme","obgnme"]] = join_obs.join(
+            tmp_obs[["date", "obsnme", "obgnme"]].set_index("date"), how="left"
+        ).loc[:,["obsnme","obgnme"]]
+        tmp_obs = None
+
     def setup_files(self, version: int = 2):
         """Setup PEST file structure for optimization
 
@@ -361,7 +389,7 @@ class PestSolver(BaseSolver):
 
         # observations
         for ml_name, ml in self.models.items():
-            # usual head obs
+            # usual pastas head obs
             obsgp = f"head_{ml_name}"
             self.pf.add_observations(
                 f"simulation_{ml_name}.csv",
@@ -369,14 +397,25 @@ class PestSolver(BaseSolver):
                 use_cols=["Observations"],
                 obsgp=obsgp,
             )
-            # head diffs from first if requested
-            if self.obs_diff_from_first:
-                obsgp = f"head_diff_{ml_name}"
+            # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
+            self._update_observations_names(
+                ml_name=ml_name,
+                obs_types=["head"],
+            )
+
+            # head diffs from previous if requested
+            if self.obs_diff:
+                obsgp = f"headdiff_{ml_name}"
                 self.pf.add_observations(
                     f"simulation_head_diffs_{ml_name}.csv",
                     index_cols=[self.obs_diffs.index.name],
                     use_cols=["Observations"],
                     obsgp=obsgp,
+                )
+                # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
+                self._update_observations_names(
+                    ml_name=ml_name,
+                    obs_types=["headdiff"],
                 )
 
         # python scripts to run
@@ -386,32 +425,17 @@ class PestSolver(BaseSolver):
         # create control file
         pst = self.pf.build_pst(self.pf.new_d / "pest.pst", version=version)
 
-        # obs weights
-        hmask = pst.observation_data.obgnme.str.find("head") >= 0
-        dmask = pst.observation_data.obgnme.str.find("head_diff") >= 0
-        hmask = hmask & ~dmask
-        pst.observation_data.loc[hmask, "weight"] = 1.0
-        if self.obs_diff_from_first:
-            pst.observation_data.loc[dmask, "weight"] = 1.0
-            pst.observation_data.loc[~dmask, "weight"] = 0.0
-            pst.observation_data.loc[
-                :, "head_min_date"
-            ] = pst.observation_data.loc[
-                :, ["obgnme","date"]
-            ].groupby(by="obgnme").transform("min")
-            first_head_mask = pst.observation_data.head_min_date == pst.observation_data.date
-            first_head_mask = first_head_mask & hmask
-            hobsgp_weights = pst.observation_data.loc[hmask,["obgnme","weight"]].groupby(by="obgnme").count()
-            hobsgp_weights = hobsgp_weights.rename(columns={"weight": "n_head_obs"})
-            first_head_weight_factor = 0.5 # this is totally subjective, up to user. ?TODO: add user param for this?
-            pst.observation_data.loc[first_head_mask, "weight"] = first_head_weight_factor * pst.observation_data.loc[
-                first_head_mask
-            ].merge(
-                hobsgp_weights, left_on="obgnme", right_index=True, how="left"
-            ).n_head_obs
-            pst.observation_data.loc[first_head_mask, "obgnme"] = pst.observation_data.loc[
-                first_head_mask, "obgnme"
-            ].apply(lambda x: f"first_{x}")
+        # define factored obs weights if requested
+        if isinstance(self, PestIesSolver) and self.phi_factors != {}:
+            # ies phi factor file
+            phi_factor_file = str(self.pf.new_d / "pest.phi_factors.csv")
+            pd.DataFrame.from_dict(self.phi_factors, orient="index").to_csv(
+                phi_factor_file, header=None
+            )
+            pst.pestpp_options.update({"ies_phi_factor_file": phi_factor_file})
+        else:
+            # TODO: manually edit weights based on initial simulation residuals
+            pass
 
         # pastas model parameter bounds
         pastas_pars_mask = pst.parameter_data.index.isin(pastas_ml_pars.values)
@@ -439,7 +463,10 @@ class PestSolver(BaseSolver):
         # add parval/bound offsets as needed depending on par_transform and zero values at bounds
         pst = PestSolver.add_offsets(pst)
 
-        pst.parameter_data.loc[:, ["parchglim"]] = "relative"
+        if self.par_transform == "log":
+            pst.parameter_data.loc[:, ["parchglim"]] = "factor"
+        else:
+            pst.parameter_data.loc[:, ["parchglim"]] = "relative"
         pst.parameter_data.loc[pastas_pars_mask, ["pargp"]] = (
             self.par_sel.columns.to_list()
         )
@@ -514,10 +541,10 @@ class PestSolver(BaseSolver):
         #) # not sure this is kosher with multi models cals - same dates repeated across models? But also not sure if this or the json below is even used...
         self.observation_index = pd.DataFrame(
             {
-                "obsnme": pst.observation_data.index.values,
+                "obsnme": self.observations.obsnme.values,
                 "model_name": self.observations.model_name.values,
                 "date": self.observations.index.values,
-                "obgnme": pst.observation_data.obgnme.values,
+                "obgnme": self.observations.obgnme.values,
             }
         ).set_index(["model_name","obgnme","date"])
         self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
