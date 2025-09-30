@@ -56,8 +56,8 @@ def run() -> None:
         simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv")
 
         # save head_diffs too
-        head_diffs = simulation - simulation.loc[simulation.index.min()]
-        head_diffs.loc[ml.observations().index].to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv")
+        head_diffs = (simulation - simulation.shift().values).dropna()
+        head_diffs.to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv")
 
 
 def run_pypestworker(
