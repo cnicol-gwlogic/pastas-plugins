@@ -135,11 +135,37 @@ class PestSolver(BaseSolver):
 
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
+        self.pcovs = {}  # dict of models {model.name: model} to be solved by pest simultaneously
 
-    def add_model(self, model):
+    def add_model(
+            self,
+            model,
+            pcov: Optional[DataFrame | None] = None,
+    ):
+        """
+        Add model to the PEST solver.
+
+        Parameters
+        ----------
+        model : pastas.Model
+            Pastas model to add to the PEST solver.
+        pcov : DataFrame | None, optional
+            The parameter covariance matrix. Default is None.
+            Eg: par cov from a pre-PEST least squares solve in pastas.
+        """
         self.remove_model(model)
         self.models[model.name] = model
         logger.info(f"Model: {model.name} added to solver.models")
+        if pcov is not None:
+            self.pcovs[model.name] = pcov
+            logger.info(f"Model pcov: pcov for {model.name} added to solver.pcovs")
+
+    def _remove_pcov(self, model):
+        try:
+            self.pcovs.pop(model.name)
+            logger.info(f"pcov: {model.name} removed from solver.pcovs")
+        except KeyError as e:
+            logger.info(f"pcov: {model.name} not in solver.pcovs")
 
     def remove_model(self, model):
         try:
@@ -147,6 +173,7 @@ class PestSolver(BaseSolver):
             logger.info(f"Model: {model.name} removed from solver.models")
         except KeyError as e:
             logger.info(f"Model: {model.name} not in solver.models")
+        self._remove_pcov(model)
 
     @property
     def stressmodel_parameterisers(self) -> list:
@@ -194,6 +221,8 @@ class PestSolver(BaseSolver):
         """Setup and export Pastas model for PEST optimization"""
         if self.models == {}:
             self.models[self.ml.name] = self.ml
+            if self.pcov is not None:
+                self.pcovs[self.ml.name] = self.pcov
         # observations
         obs_list, obs_diffs_list = [], []
         for ml_name, ml in self.models.items():
@@ -501,24 +530,44 @@ class PestSolver(BaseSolver):
 
         # build a list of parcovs for IES
         if isinstance(self, PestIesSolver):
-            pastas_parcov = pyemu.Cov.from_parameter_data(
-                pst,
-                sigma_range=4.0,
-                scale_offset=False,
-                subset=pastas_ml_pars,  # .to_list(), pyemu doc says str, but has to be a Series/Index
-            )  # returns a diagonal matrix
-            # I think the wording in pyemu doc is wrong on scale_offset=True by default.
-            # Here, parval1 is already scaled and offset...why add those before doing cov calcs?
-            # definitely get log par errors. Maybe pyemu does the anti-scale/offset immediately
-            # before pst.write (scary!), whereas here we have already done that.
-            # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.
-            unc_str = self._get_uncfile_str(
-                pastas_parcov
-            )  # default args are for diagonals
+            if self.pcovs != {}:
+                unc_str = ""
+                for ml_name, pcov in self.pcovs.items():
+                    pastas_parcov = pyemu.Cov(
+                        x=pcov.values,
+                        names=pcov.columns,
+                        isdiagonal=False,
+                    )
+                    covmat_fname = str(
+                        self.temp_ws / f"pest.prior.{ml_name}.pastas_pars.jcb"
+                    )
+                    pastas_parcov.to_binary(covmat_fname)
+                    unc_str += self._get_uncfile_str(
+                        pastas_parcov,
+                        covmat_file=covmat_fname,
+                        var_mult=1.0,
+                        # TODO probs need a user variable here, or define internally based on par range for this stressmodel par set
+                        include_path=False,
+                    )
+            else:
+                pastas_parcov = pyemu.Cov.from_parameter_data(
+                    pst,
+                    sigma_range=4.0,
+                    scale_offset=False,
+                    subset=pastas_ml_pars,  # .to_list(), pyemu doc says str, but has to be a Series/Index
+                )  # returns a diagonal matrix
+                # I think the wording in pyemu doc is wrong on scale_offset=True by default.
+                # Here, parval1 is already scaled and offset...why add those before doing cov calcs?
+                # definitely get log par errors. Maybe pyemu does the anti-scale/offset immediately
+                # before pst.write (scary!), whereas here we have already done that.
+                # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.
+                unc_str = self._get_uncfile_str(
+                    pastas_parcov
+                )  # default args are for diagonals
             pastas_parcov = None
             if self.stressmodel_parameterisers:
                 covmat_fname = str(
-                    self.temp_ws / f"pest.prior.{sm_p.stressmodel_name}.jco"
+                    self.temp_ws / f"pest.prior.{sm_p.stressmodel_name}.jcb"
                 )
                 sm_p.stress_parcov.to_binary(covmat_fname)
                 for sm_p in self.stressmodel_parameterisers:
