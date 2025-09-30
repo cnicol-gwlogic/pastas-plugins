@@ -163,8 +163,12 @@ def run_pypestworker(
                 obs_diffs_list.append(head_diffs)
 
         obsvals = concat(obsvals_list, axis=0, ignore_index=False)
-        obs_diffs = concat(obs_diffs_list, axis=0, ignore_index=False)
-        obsvals_all = concat([obsvals, obs_diffs], axis=0, ignore_index=False)
+        if len(obs_diffs_list) > 0:
+            obs_diffs = concat(obs_diffs_list, axis=0, ignore_index=False)
+            obsvals_all = concat([obsvals, obs_diffs], axis=0, ignore_index=False)
+        else:
+            obsvals_all = obsvals
+
         ppw.send_observations(obsvals=obsvals_all)
 
         pvals = ppw.get_parameters()

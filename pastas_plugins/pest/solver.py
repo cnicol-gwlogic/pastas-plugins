@@ -44,10 +44,7 @@ class PestSolver(BaseSolver):
         add_tikhonov_reg: Optional[bool] = False,
         stressmodel_parameterisers: Optional[list | None] = None,
         obs_diff: Optional[bool] = False,
-        phi_factors: Optional[dict] = {
-            "headdiff_": 0.85,
-            "head_": 0.15,
-        },
+        phi_factors: Optional[dict] = {},
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -245,8 +242,8 @@ class PestSolver(BaseSolver):
             ]
             parameters.index.name = "parnames"
             if "constant_d" in parameters.index:
-                heads_mask = self.observations.model_name == ml_name
-                heads_mask = heads_mask & self.observations.obs_type == "head"
+                heads_mask = (self.observations.model_name == ml_name)
+                heads_mask = heads_mask & (self.observations.obs_type == "head")
                 observations = self.observations.Observations.loc[heads_mask]
                 if np.isnan(parameters.at["constant_d", "pmin"]):
                     ml.set_parameter(
@@ -424,6 +421,8 @@ class PestSolver(BaseSolver):
 
         # create control file
         pst = self.pf.build_pst(self.pf.new_d / "pest.pst", version=version)
+        if "longname" not in pst.parameter_data.columns:
+            pst.parameter_data["longname"] = pst.parameter_data.index.values
 
         # define factored obs weights if requested
         if isinstance(self, PestIesSolver) and self.phi_factors != {}:
@@ -432,7 +431,7 @@ class PestSolver(BaseSolver):
             pd.DataFrame.from_dict(self.phi_factors, orient="index").to_csv(
                 phi_factor_file, header=None
             )
-            pst.pestpp_options.update({"ies_phi_factor_file": phi_factor_file})
+            pst.pestpp_options.update({"ies_phi_factor_file": Path(phi_factor_file).name})
         else:
             # TODO: manually edit weights based on initial simulation residuals
             pass
