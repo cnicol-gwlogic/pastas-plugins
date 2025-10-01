@@ -215,6 +215,8 @@ class PestSolver(BaseSolver):
         diffs.dropna(subset=["Observations"], inplace=True)
         diffs.loc[:,"obs_type"] = "headdiff"
         diffs.loc[:, "weight"] = 1.0
+        high_mask = (diffs.Observations.abs() >= diffs.Observations.abs().quantile(0.75))
+        diffs.loc[~high_mask, "weight"] = 2.0
         return diffs
 
     def setup_model(self):
@@ -345,6 +347,7 @@ class PestSolver(BaseSolver):
         self.observations.loc[omask, ["obsnme","obgnme"]] = join_obs.join(
             tmp_obs[["date", "obsnme", "obgnme"]].set_index("date"), how="left"
         ).loc[:,["obsnme","obgnme"]]
+        self.pf.obs_dfs[-1].loc[:,"weight"] = self.observations.loc[omask].set_index("obsnme").weight
         tmp_obs = None
 
     def setup_files(self, version: int = 2):
