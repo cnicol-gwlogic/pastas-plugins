@@ -28,7 +28,8 @@ def run() -> None:
     for ml in models:
         for pname, val in parameters.loc[:, "optimal"].items():
             pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-            ml.set_parameter(pname[3:], optimal=val)
+            if pname[3:] in ml.parameters.index.values:
+                ml.set_parameter(pname[3:], optimal=val)
     # update custom stressmodel parameters
     pickles = glob.glob(str(fpath / "*.parameteriser.pkl"))
     stressmodel_parameterisers = [
@@ -92,12 +93,6 @@ def run_pypestworker(
     if pvals is None:
         return None
 
-    # reactivate the model logger - it was deactivated before provision
-    # as an arg to this module.
-    # (multiprocesing uses pickling (of ml in this case), and pickle
-    # can't pickle open file handle logger instances)
-    #ml.logger = getLogger(ml.name)
-
     while True:
         # update custom stressmodel parameters
         for sm_p in stressmodel_parameterisers:
@@ -121,8 +116,6 @@ def run_pypestworker(
             ml.settings["tmin"] = None
             ml.settings["tmax"] = None
             # update standard pastas model parameters
-            """pvals.to_csv(f"{ml.name}.{ppw.net_pack.runid}.pvals.temp.csv")
-            updated_stress_df.to_csv(f"{ml.name}.{ppw.net_pack.runid}.updated_stress_df.temp.csv")"""
             for pname, val in pvals.items():
                 pname = parameter_index[pname]
                 pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
@@ -131,16 +124,12 @@ def run_pypestworker(
             # update stress TimeSeries
             for sm_p in stressmodel_parameterisers:
                 smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-                for stress_series in smodel.stress:
-                    if stress_series.name in sm_p.stress_names:
-                        stress_series.series_original = updated_stress_df.loc[
-                            :, stress_series.name
-                        ]
-                        """ml.stressmodels[
-                            sm_p.stressmodel_name
-                        ].stress[idx].series_original = updated_stress_df.loc[
-                            :, stress_series.name
-                        ]"""
+                if smodel is not None:
+                    for stress_series in smodel.stress:
+                        if stress_series.name in sm_p.stress_names:
+                            stress_series.series_original = updated_stress_df.loc[
+                                :, stress_series.name
+                            ]
             sim = ml.simulate()
             obs = observation_index.xs(ml.name)
             obs = obs.loc[obs.index.get_level_values("obgnme").isin(head_obsgps)].droplevel("obgnme") # xs-->df indexed by date. Values are just obsnme
