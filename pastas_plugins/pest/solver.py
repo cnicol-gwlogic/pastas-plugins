@@ -483,21 +483,32 @@ class PestSolver(BaseSolver):
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
                     "index"
                 )
-                indexer = pst.parameter_data.loc[~pastas_pars_mask].longname.values
-                pst.parameter_data.loc[~pastas_pars_mask, ["parval1","partrans","parlbnd","parubnd"]] = (
-                    sm_p.stress_pars.loc[indexer,["parval1","partrans","parlbnd","parubnd"]]
-                ).values # need .values for hp / shortnames cases -> index comparison differs in that case (note longname rather than index in indexer above)
+                pst.parameter_data.loc[sm_p.stress_pars.index, ["parval1","partrans","parlbnd","parubnd"]] = (
+                    sm_p.stress_pars.loc[:,["parval1","partrans","parlbnd","parubnd"]]
+                )
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
                     ["column_names", "index_org"]
                 )
 
+        # Tie duplicate wellmodel pars to other wellmodels' pars.
+        # We want the same params used across stressmodels where the same stress (eg pumping bore) / datetime is used.
+        pst.parameter_data["parnme_common_base"] = pst.parameter_data.parnme.str.replace("_inst:\d+", "", regex=True)
+        pst.parameter_data["inst_first"] = pst.parameter_data.groupby("parnme_common_base").inst.transform("min")
+        tied_mask = (pst.parameter_data.inst > pst.parameter_data.inst_first)
+        source_pars = pst.parameter_data.loc[
+            (pst.parameter_data.inst == pst.parameter_data.inst_first)
+        ].set_index("parnme_common_base")
+        pst.parameter_data.loc[tied_mask, "partied"] = source_pars.loc[
+            pst.parameter_data.loc[tied_mask].parnme_common_base
+        ].parnme.values
+        pst.parameter_data.loc[tied_mask, "partrans"] = "tied"
+
         # add parval/bound offsets as needed depending on par_transform and zero values at bounds
         pst = PestSolver.add_offsets(pst)
 
-        if self.par_transform == "log":
-            pst.parameter_data.loc[:, ["parchglim"]] = "factor"
-        else:
-            pst.parameter_data.loc[:, ["parchglim"]] = "relative"
+        log_update_mask = pst.parameter_data.partrans == "log"
+        pst.parameter_data.loc[log_update_mask, ["parchglim"]] = "factor"
+        pst.parameter_data.loc[~log_update_mask, ["parchglim"]] = "relative"
         pst.parameter_data.loc[pastas_pars_mask, ["pargp"]] = (
             self.par_sel.columns.to_list()
         )

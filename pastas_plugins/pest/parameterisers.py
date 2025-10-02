@@ -214,11 +214,15 @@ class BaseParameteriser(ABC):
         """
         if self.par_bounds is not None:
             sill = self.par_bounds.loc[self.source_points.index, ["parubnd", "parlbnd"]]
-            if self.solver.par_transform == "log":
-                sill_mins = sill.groupby(level="column_names")["parlbnd"].transform(
+            if "partrans" not in sill.columns:
+                sill["partrans"] = "log" if self.solver.par_transform == "log" else "none"
+            logmask = sill.partrans == "log"
+            if logmask.any():
+                sill_mins = sill.loc[logmask].groupby(level="column_names")["parlbnd"].transform(
                     "min"
                 )
-                sill = (sill.add(sill_mins.abs(), axis="index") + 0.1).apply(
+                sill.loc[logmask, ["parubnd", "parlbnd"]] = (sill.loc[logmask, ["parubnd", "parlbnd"]].add(
+                    sill_mins.abs(), axis="index") + 0.1).apply(
                     np.log10
                 )  # log nonzero values
             sill["par_range"] = sill.parubnd - sill.parlbnd
@@ -379,7 +383,6 @@ class BaseParameteriser(ABC):
         return self._parnme_indexer
 
     def _build_parnme_indexer(self) -> None:
-        # usecols = self.stress_pars.parnme.apply(lambda s: s.split("_usecol:")[-1].split("_pstyle:")[0]).rename("column_names")
         usecols = (
             self.source_points.column_names
         )  # should be in same order as stress_pars
@@ -401,13 +404,6 @@ class BaseParameteriser(ABC):
         self._parnme_indexer = parnme_indexer
         self.stress_pars["column_names"] = parnme_indexer.column_names
         self.stress_pars["index_org"] = parnme_indexer.indices
-        # the above will not work for pest_hp solves as can't use pyemu longnames. Hence exception below in interpolate_stresses().
-        # TODO: Need a way of getting from shortnames to usecols (need to mod pyemu.PstFrom to spit the usecol name out? Would be very handy)
-        # Also really would be easiest/safest if original file index value was included.
-        # Possible solution: A function to read a tpl file into a dataframe (skipping line 0), and replace the marker (found in line 0) with ""
-        # Then we have parnames at given df locations. So from that we can build a dataframe of row/col indexers / nans where no par exists.
-        # From that, we can dropna and flatten it. Only works for structured tpl files (smp/csv types), not weirdly structured text output with complicated tpl markers.
-        # But that's ok here cos we use pyemu to build everything.
 
     def interpolate_stresses(
         self,
@@ -567,7 +563,7 @@ class BaseParameteriser(ABC):
 
     def _mod2obs(self) -> DataFrame:
         """
-        Internal method to intrpolate modelled stress rates to observed datetimes.
+        Internal method to interpolate modelled stress rates to observed datetimes.
         """
         # define interp function: stressmodel stress rates to obs data datetimes
         # insert obs indices --> interp(linear) -->keep only obs dts
@@ -749,18 +745,6 @@ class WellModelParameteriser(BaseParameteriser):
                 .transform("median")
                 .intervals
             )
-            """source_points = source_points.reset_index(drop=False).set_index(["Datetime", "column_names"])
-            windexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=3)
-            source_points.loc[:, "rolling_4xmean_intervals"] = (
-                source_points.groupby(level=["column_names"])["intervals"]
-                .rolling(window=windexer, min_periods=1)
-                .mean().ffill().bfill().droplevel(level=-1).values #transform(lambda x: x)
-            )
-            source_points.to_csv("temp.source_points.csv", date_format=self.date_format)
-            source_points = source_points.reset_index(drop=False).set_index("Datetime")
-            source_points.loc[:, "vario_ranges"] = (
-                source_points.rolling_4xmean_intervals * self.t_variogram_range_freq_factor
-            ).clip(upper=self.max_vario_range)"""
             source_points.loc[:, "vario_ranges"] = (
                 source_points.median_intervals * self.t_variogram_range_freq_factor
             ).clip(upper=self.max_vario_range)
@@ -798,7 +782,6 @@ class WellModelParameteriser(BaseParameteriser):
             logger.error(f"Unsupported value for par_freq provided ({self.par_freq}).")
             raise Exception
 
-        source_points.index.name = "Datetime" 
         source_points = source_points.reset_index(drop=False).set_index(
             ["column_names", "Datetime"]
         )
@@ -907,24 +890,6 @@ class WellModelParameteriser(BaseParameteriser):
                 :, ["parval1","partrans","parlbnd", "parubnd"]
             ]
 
-        """DON'T NEED THIS - USE PARBOUNDS INPUT INSTEAD 
-        if self.stress_minmax_dates is not None:
-            # filter out stresses not in stress_names (not parameterised)
-            self.stress_minmax_dates = self.stress_minmax_dates.loc[self.stress_names]
-            # fill nans with min/max stress date
-            self.stress_minmax_dates.loc[self.stress_minmax_dates.min_date.isna(), "min_date"] = self.stress.index.min()
-            self.stress_minmax_dates.loc[self.stress_minmax_dates.max_date.isna(), "max_date"] = self.stress.index.max()
-            self.stress_pars = self.stress_pars.merge(
-                self.stress_minmax_dates,
-                right_index=True,
-                left_on="column_names",
-                how="left",
-            )
-            mask = self.stress_pars.index.get_level_values("index_org") < self.stress_pars.min_date
-            mask = mask | (self.stress_pars.index.get_level_values("index_org") > self.stress_pars.max_date)
-            self.stress_pars.loc[mask,"partrans"] = "fixed"
-            self.stress_pars.loc[mask, "parval1"] = 0.0
-        """
         # make pcov for pilot points
         self._get_ppoint_cov(self.source_points)
 
