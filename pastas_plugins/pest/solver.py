@@ -135,7 +135,9 @@ class PestSolver(BaseSolver):
 
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
-        self.pcovs = {}  # dict of models {model.name: model} to be solved by pest simultaneously
+        self.pcovs = {}  # dict of pcovs {model.name: pcov} for each model to be solved by pest simultaneously
+
+        self.stress_obs = None
 
     def add_model(
             self,
@@ -177,12 +179,12 @@ class PestSolver(BaseSolver):
 
     @property
     def stressmodel_parameterisers(self) -> list:
-        """Property for getting stressmodel_parameterisers"""
+        """Returns list of stressmodel_parameterisers"""
         return self._stressmodel_parameterisers
 
     @stressmodel_parameterisers.setter
     def stressmodel_parameterisers(self, stressmodel_parameterisers) -> None:
-        """Setter for setting stressmodel_parameterisers"""
+        """Set stressmodel_parameterisers"""
         self._stressmodel_parameterisers = (
             [] if not stressmodel_parameterisers else stressmodel_parameterisers
         )
@@ -226,27 +228,48 @@ class PestSolver(BaseSolver):
             if self.pcov is not None:
                 self.pcovs[self.ml.name] = self.pcov
         # observations
-        obs_list, obs_diffs_list = [], []
+        obs_list, obs_diffs_list, stress_obs_list = [], [], []
         for ml_name, ml in self.models.items():
+            # heads
             observations = ml.observations()
             observations.name = "Observations"
             observations = observations.to_frame()
             observations["obs_type"] = "head"
             observations["weight"] = 1.0
+            # head differences from previous
             if self.obs_diff:
                 obs_diffs = self._get_obs_diff(observations)
                 obs_diff_file = self.model_ws / f"simulation_head_diffs_{ml_name}.csv"
-                obs_diffs.Observations.to_csv(obs_diff_file)
+                obs_diffs.Observations.to_csv(obs_diff_file, date_format="%d/%m/%Y")
                 copy_file(obs_diff_file, self.temp_ws)
                 obs_diffs.loc[:, "model_name"] = ml_name
                 obs_diffs_list.append(obs_diffs.copy())
             obs_file = self.model_ws / f"simulation_{ml_name}.csv"
-            observations.Observations.to_csv(obs_file)
+            observations.Observations.to_csv(obs_file, date_format="%d/%m/%Y")
             copy_file(obs_file, self.temp_ws)
             observations.loc[:, "model_name"] = ml_name
             obs_list.append(observations.copy())
+
+        # stress obs
+        for sm_p in self.stressmodel_parameterisers:
+            if sm_p.obs_data is not None:
+                obs_stress_file = self.model_ws / f"{sm_p.stressmodel_name}.stress_obs.csv"
+                sm_p.obs_data.to_csv(obs_stress_file, date_format=sm_p.date_format)
+                copy_file(obs_stress_file, self.temp_ws)
+                sm_p.obs_data.name = "Observations"
+                sm_p_obs = sm_p.obs_data.to_frame()
+                sm_p_obs.loc[:, "model_name"] = ml_name
+                sm_p_obs.loc[:, "obs_type"] = "stress_obs"
+                sm_p_obs.loc[:, "weight"] = 1.0
+                stress_obs_list.append(sm_p_obs)
+
+        self.stress_obs = pd.concat(
+            stress_obs_list,
+            ignore_index=False)  # can't concat this with self.observations because index differs
+
         self.observations = pd.concat(obs_list, ignore_index=False)
         self.observations.index.name = "date"
+
         if self.obs_diff:
             self.obs_diffs = pd.concat(obs_diffs_list, ignore_index=False)
             self.obs_diffs.index.name = "date"
@@ -324,18 +347,52 @@ class PestSolver(BaseSolver):
         """
         pst.write(self.pf.new_d / "pest.pst", version=version)
 
+    def _update_stress_obs_names(
+            self,
+            ml_name: str,
+            obs_types: list,
+            date_format="%d/%m/%Y",
+    ) -> None:
+        """
+        Add pest obsnme and obgnme to self.stress_obs dataframe. Designed to be called
+        immediately after each self.pf.add_observations() call.
+        """
+        tmp_obs = self.pf.obs_dfs[-1].assign(
+            date=self.pf.obs_dfs[-1].obsnme.apply(
+                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=date_format)),
+            column_names=self.pf.obs_dfs[-1].obsnme.apply(
+                lambda x: x.rsplit("_date:")[0].rsplit("_column_names:", 1)[-1]
+            )
+        )
+        tmp_obs["column_names"] = tmp_obs.column_names.apply(
+            lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1].upper()}"
+        )
+        omask = (self.stress_obs.model_name == ml_name) & \
+                (self.stress_obs.obs_type.isin(obs_types))
+        join_obs = self.stress_obs.loc[omask]
+        try:
+            join_obs = join_obs.drop(columns=["obsnme","obgnme"])
+        except: # if the cols don't exist (on first use of this function) we get an exception
+            pass
+        self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.join(
+            tmp_obs[["column_names", "date", "obsnme", "obgnme"]].set_index(["column_names", "date"]), how="left"
+        ).loc[:,["obsnme","obgnme"]]
+        self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].set_index("obsnme").weight
+        tmp_obs = None
+
     def _update_observations_names(
             self,
             ml_name: str,
             obs_types: list,
+            date_format="%d/%m/%Y",
     ) -> None:
         """
         Add pest obsnme and obgnme to self.observations dataframe. Designed to be called
-        immediately after each self.pf.add_observations() call
+        immediately after each self.pf.add_observations() call.
         """
         tmp_obs = self.pf.obs_dfs[-1].assign(
             date=self.pf.obs_dfs[-1].obsnme.apply(
-                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format="%Y-%m-%d"))
+                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=date_format))
         )
         omask = (self.observations.model_name == ml_name) & \
                 (self.observations.obs_type.isin(obs_types))
@@ -447,6 +504,23 @@ class PestSolver(BaseSolver):
                     obs_types=["headdiff"],
                 )
 
+        # stress obs
+        for sm_p in self.stressmodel_parameterisers:
+            if sm_p.obs_data is not None:
+                obsgp = f"stress_{sm_p.stressmodel_name}"
+                self.pf.add_observations(
+                    f"{sm_p.stressmodel_name}.stress_obs.csv",
+                    index_cols=sm_p.obs_data.index.names,
+                    use_cols=["Observations"],
+                    obsgp=obsgp,
+                )
+                # add pest obsnme and obgnme to self.stress_obs for this last set of obs added to pst
+                self._update_stress_obs_names(
+                    ml_name=ml_name,
+                    obs_types=["stress_obs"],
+                    date_format=sm_p.date_format,
+                )
+
         # python scripts to run
         self.pf.add_py_function(self.run_function, "run()", is_pre_cmd=None)
         self.pf.mod_py_cmds.append("run()")
@@ -465,7 +539,7 @@ class PestSolver(BaseSolver):
             )
             pst.pestpp_options.update({"ies_phi_factor_file": Path(phi_factor_file).name})
         else:
-            # TODO: manually edit weights based on initial simulation residuals
+            # TODO: manually edit weights based on initial simulation residuals (pest_hp cases)
             pass
 
         # pastas model parameter bounds
@@ -492,7 +566,7 @@ class PestSolver(BaseSolver):
 
         # Tie duplicate wellmodel pars to other wellmodels' pars.
         # We want the same params used across stressmodels where the same stress (eg pumping bore) / datetime is used.
-        pst.parameter_data["parnme_common_base"] = pst.parameter_data.parnme.str.replace("_inst:\d+", "", regex=True)
+        pst.parameter_data["parnme_common_base"] = pst.parameter_data.parnme.str.replace(r"_inst:\d+", "", regex=True)
         pst.parameter_data["inst_first"] = pst.parameter_data.groupby("parnme_common_base").inst.transform("min")
         tied_mask = (pst.parameter_data.inst > pst.parameter_data.inst_first)
         source_pars = pst.parameter_data.loc[
@@ -598,9 +672,8 @@ class PestSolver(BaseSolver):
 
         with (self.temp_ws / "parameter_index.json").open("w") as f:
             json.dump(obj=self.parameter_index, fp=f, default=str)
-        #self.observation_index = dict(
-        #    zip(pst.observation_data.index, self.observations.index)
-        #) # not sure this is kosher with multi models cals - same dates repeated across models? But also not sure if this or the json below is even used...
+
+        # define an observation index for linking pst obsnme to observation / simulation data
         self.observation_index = pd.DataFrame(
             {
                 "obsnme": self.observations.obsnme.values,
@@ -800,6 +873,7 @@ class PestGlmSolver(PestSolver):
                     "parameter_index": self.parameter_index,
                     "observation_index": self.observation_index,
                     "stressmodel_parameterisers": self.stressmodel_parameterisers,
+                    "stress_obs": self.stress_obs,
                 }
                 if self.use_pypestworker
                 else {},  # the arguments to pass to the ppw_function
@@ -957,6 +1031,7 @@ class PestHpSolver(PestSolver):
                 "parameter_index": self.parameter_index,
                 "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
+                "stress_obs": self.stress_obs,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
@@ -1160,6 +1235,7 @@ class PestIesSolver(PestSolver):
                 "parameter_index": self.parameter_index,
                 "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
+                "stress_obs": self.stress_obs,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
@@ -1742,8 +1818,11 @@ class PestSenSolver(PestSolver):
             if self.use_pypestworker
             else None,  # the function to run in the agent
             ppw_kwargs={
-                "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
+                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
                 "parameter_index": self.parameter_index,
+                "observation_index": self.observation_index,
+                "stressmodel_parameterisers": self.stressmodel_parameterisers,
+                "stress_obs": self.stress_obs,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function

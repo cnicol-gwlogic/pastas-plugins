@@ -41,11 +41,12 @@ def run() -> None:
         # update stress TimeSeries
         for ml in models:
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-            for stress_series in smodel.stress:
-                if stress_series.name in sm_p.stress_names:
-                    stress_series.series_original = updated_stress_df.loc[
-                        :, stress_series.name
-                    ]
+            if smodel is not None:
+                for stress_series in smodel.stress:
+                    if stress_series.name in sm_p.stress_names:
+                        stress_series.series_original = updated_stress_df.loc[
+                            :, stress_series.name
+                        ]
     # ^^ one sm_p even for many pastas models in one pest cal will work ok - we just update the stress rates,
     # while pumping well distances from each model (obs bore) remain as originally defined per model.
     # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
@@ -60,6 +61,11 @@ def run() -> None:
         head_diffs = (simulation - simulation.shift().values).dropna()
         head_diffs.to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv")
 
+        # stress obs
+        for sm_p in stressmodel_parameterisers:
+            if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
+                stress_mod = sm_p.mod2obs()
+                stress_mod.to_csv(f"{sm_p.stressmodel_name}.stress_obs.csv", date_format="%d/%m/%Y")
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
@@ -70,6 +76,7 @@ def run_pypestworker(
     parameter_index: dict,
     observation_index: DataFrame,
     stressmodel_parameterisers: list = [],
+    stress_obs: DataFrame | None = None,
 ) -> None:
     from logging import getLogger
 
@@ -103,7 +110,7 @@ def run_pypestworker(
             interp_kwargs["updated_sourcevals"] = new_par_values
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
 
-        obsvals_list, obs_diffs_list = [], []
+        obsvals_list, obs_diffs_list, stress_obs_list = [], [], []
         head_obsgps = [
             og for og in observation_index.index.get_level_values("obgnme").unique() \
             if og.find("headdiff") < 0
@@ -130,7 +137,10 @@ def run_pypestworker(
                             stress_series.series_original = updated_stress_df.loc[
                                 :, stress_series.name
                             ]
+            # run simulation
             sim = ml.simulate()
+
+            # get head obs
             obs = observation_index.xs(ml.name)
             obs = obs.loc[obs.index.get_level_values("obgnme").isin(head_obsgps)].droplevel("obgnme") # xs-->df indexed by date. Values are just obsnme
             obsvals = sim.loc[obs.index.values]
@@ -151,12 +161,24 @@ def run_pypestworker(
                 head_diffs.index = onames
                 obs_diffs_list.append(head_diffs)
 
-        obsvals = concat(obsvals_list, axis=0, ignore_index=False)
+            # stress obs
+            if stress_obs is not None:
+                for sm_p in stressmodel_parameterisers:
+                    if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
+                        stress_mod = sm_p.mod2obs()
+                        # reindex with pest obsnme
+                        obsnmes = stress_obs.loc[stress_mod.index].obsnme
+                        stress_mod.index = obsnmes
+                        # store the series
+                        stress_obs_list.append(stress_mod)
+
+        obsvals_all = concat(obsvals_list, axis=0, ignore_index=False)
         if len(obs_diffs_list) > 0:
             obs_diffs = concat(obs_diffs_list, axis=0, ignore_index=False)
-            obsvals_all = concat([obsvals, obs_diffs], axis=0, ignore_index=False)
-        else:
-            obsvals_all = obsvals
+            obsvals_all = concat([obsvals_all, obs_diffs], axis=0, ignore_index=False)
+        if len(stress_obs_list) > 0:
+            stress_obs = concat(stress_obs_list, axis=0, ignore_index=False)
+            obsvals_all = concat([obsvals_all, stress_obs], axis=0, ignore_index=False)
 
         ppw.send_observations(obsvals=obsvals_all)
 

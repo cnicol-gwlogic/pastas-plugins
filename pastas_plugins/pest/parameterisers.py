@@ -103,9 +103,11 @@ class BaseParameteriser(ABC):
         self.stress = (
             self.stressmodel.get_stress()
         )  # not sure Series-based stressmodels can handle squeeze argument
-        self.stress_names = self.stress.columns.to_list()
         if isinstance(self.stressmodel, WellModel):
             self.stress = self.stressmodel.get_stress(squeeze=False)
+        self.stress_names = self.stress.columns.to_list()
+        # stress obs data
+        self.obs_data = None
 
         # Parameterisation things
         self.source_points = None
@@ -449,22 +451,9 @@ class BaseParameteriser(ABC):
                 date_format=self.date_format,
             )  # read pest-updated values from disk
         else:  # pypestworker call - updated values from series (parnme:value) in memory
-            """if not self.solver.long_names:
-                raise Exception(
-                    f"PestSolver.long_names must be True for {self._name}.interpolate_stress.updated_sourcevals to work as currently coded.\n \
-                                Hence Pest_HP solver is not yet supported with this function."
-                )  # see TODO note above for a possible solution."""
             sourcevals = self.modelfile_df_org.reset_index(drop=False).set_index("parnme")
             sourcevals.loc[:, "value"] = updated_sourcevals # this should already be indexed by parnme in forward run, so in order
             sourcevals = sourcevals.reset_index(drop=False).set_index(["column_names","Datetime"])
-            # self.stress_pars (returned pstfrom() df) has usecol and parnme in it? We could use that (better than reading from disk). <--see self.parnme_indexer
-            """for krig_col, df in sourcevals.groupby(level="column_names"):
-                parnames = self.stress_pars.loc[
-                    self.stress_pars.index.get_level_values("column_names") == krig_col
-                ].parnme
-                # usecols = self.parnme_indexer.loc[parnames].column_names
-                indexer = self.parnme_indexer.loc[parnames].indices  # Datetime
-                sourcevals.loc[[krig_col, indexer], "value"] = updated_sourcevals"""
 
         krig_cols = self.stress_names
         source_stresses = self.stress.copy()  # crosstab with columns of stressmodel rate timeseries (per bore). Index is datetime
@@ -543,8 +532,7 @@ class BaseParameteriser(ABC):
 
     def add_stress_obs(
             self,
-            obs_data : Series = None,
-
+            obs_data: Optional[Series | None] = None,
     ) -> None:
         """
         Add observations of stress rates for pest.
@@ -552,32 +540,30 @@ class BaseParameteriser(ABC):
         Parameters
         ----------
         obs_data : Optional[Series]
-            Observed stress value data points. Indexed by datetime.
+            Observed stress value data points. Indexed by [column_names (bore), Datetime]
 
         Returns
         -------
         None
         """
-
         self.obs_data = obs_data
+        self.obs_data.index.names = ["column_names","date"]
 
-    def _mod2obs(self) -> DataFrame:
+    def mod2obs(self) -> Series:
         """
-        Internal method to interpolate modelled stress rates to observed datetimes.
+        Interpolate modelled stress rates to observed datetimes.
         """
-        # define interp function: stressmodel stress rates to obs data datetimes
         # insert obs indices --> interp(linear) -->keep only obs dts
-        new_idx = self.stress.index.union(self.obs_data.index, sort=True)
-        modobs = self.stress.reindex(new_idx).melt(
-                var_name="column_names", ignore_index=False
-            ).groupby(by="column_names").apply(
+        modobs = self.stress.melt(
+            var_name="column_names", ignore_index=False,
+            value_name="Observations"
+        ).reset_index(drop=False).set_index(["column_names","Datetime"])
+        modobs.index.names = ["column_names","date"]
+        new_idx = modobs.index.union(self.obs_data.index)
+        modobs = modobs.reindex(new_idx).groupby(level="column_names").transform(
             lambda x: x.interpolate(method='linear')
         )
-        modobs = modobs.loc[self.obs_data.index].reset_index(
-            drop=False
-        ).set_index(
-            ["Datetime","column_names"]
-        )
+        modobs = modobs.loc[self.obs_data.index].Observations
 
         return modobs
 
@@ -585,7 +571,7 @@ class WellModelParameteriser(BaseParameteriser):
     """
     Custom WellModel stress parameteriser.
     Designed to be first instantiated outside the PestSolver for a given StressModel,
-    and then passed to PestSolver via the pest_parameterisers argument.
+    and then passed to PestSolver via the stressmodel_parameterisers argument.
 
     Parameters
     ----------
@@ -693,7 +679,6 @@ class WellModelParameteriser(BaseParameteriser):
         self.t_variogram_sill = t_variogram_sill
         self.max_vario_range = max_vario_range
         self.par_bounds = par_bounds
-        #self.stress_minmax_dates = stress_minmax_dates
 
         # filter stress based on provided wellmodel_names
         self.stress = self.stress.filter(items=self.stress_names, axis="columns")
