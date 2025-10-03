@@ -1,6 +1,5 @@
 import pyemu
 from pandas import DataFrame
-from pastas import Model
 
 
 def run() -> None:
@@ -65,13 +64,12 @@ def run() -> None:
         for sm_p in stressmodel_parameterisers:
             if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
                 stress_mod = sm_p.mod2obs()
-                stress_mod.to_csv(f"{sm_p.stressmodel_name}.stress_obs.csv", date_format="%d/%m/%Y")
+                stress_mod.to_csv(f"{sm_p.stressmodel_name}.stress_obs.csv", date_format=sm_p.date_format)
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
-    #ml: Model,  # ml_dict: dict,
     models: dict,
     parameter_index: dict,
     observation_index: DataFrame,

@@ -447,8 +447,6 @@ class PestSolver(BaseSolver):
         if self.stressmodel_parameterisers:
             for sm_p in self.stressmodel_parameterisers:
                 sm_p.solver = self
-                # may need to customise par_name_base per sm_p depending on how (if)
-                # pyemu.PstFrom.add_parameters() deals with incrementing par names/indices.
                 sm_p.add_stress_parameters(par_name_base="sm")
                 # pickle to disk for pest non-pypestworker workers
                 fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl"
