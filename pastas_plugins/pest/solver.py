@@ -623,7 +623,7 @@ class PestSolver(BaseSolver):
         # We want the same params used across stressmodels where the same stress (eg pumping bore) / datetime is used.
         pst.parameter_data["parnme_common_base"] = pst.parameter_data.parnme.str.replace(r"_inst:\d+", "", regex=True)
         pst.parameter_data["inst_first"] = pst.parameter_data.groupby("parnme_common_base").inst.transform("min")
-        tied_mask = (pst.parameter_data.inst > pst.parameter_data.inst_first)
+        tied_mask = (pst.parameter_data.inst > pst.parameter_data.inst_first) & (pst.parameter_data.partrans != "fixed")
         source_pars = pst.parameter_data.loc[
             (pst.parameter_data.inst == pst.parameter_data.inst_first)
         ].set_index("parnme_common_base")
