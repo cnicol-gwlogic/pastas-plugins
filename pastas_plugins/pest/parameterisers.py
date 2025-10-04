@@ -4,6 +4,7 @@ from collections.abc import Callable
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Literal, Optional
+from shutil import copy as copy_file
 
 import numpy as np
 import numpy.typing as npt
@@ -784,6 +785,7 @@ class WellModelParameteriser(BaseParameteriser):
         source_points.to_csv(
             self.modelfile, date_format=self.date_format
         )  # parameterised by pstfrom
+        copy_file(self.modelfile, self.solver.temp_ws / self.modelfile.name)
 
         index_cols = [source_points.index.name, "column_names"]
         use_cols = ["value"]
