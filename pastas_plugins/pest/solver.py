@@ -209,7 +209,7 @@ class PestSolver(BaseSolver):
         return unc_str
 
     @staticmethod
-    def _get_obs_diff(observations: Series) -> DataFrame:
+    def _get_obs_diff(observations: DataFrame) -> DataFrame:
         """Returns difference from previous head obs Series"""
         mask = observations.obs_type=="head"
         diffs = observations.loc[mask].copy()
@@ -221,6 +221,23 @@ class PestSolver(BaseSolver):
         diffs.loc[~high_mask, "weight"] = 2.0
         return diffs
 
+    @staticmethod
+    def _setup_base_obs(
+            data: Series,
+            obs_type: str = "head",
+            weight: float = 1.0,
+            series_name: str = "Observations",
+            other_col_data: dict | None = None,
+    ) -> DataFrame:
+        """convert Pastas sim-type Series to DataFrame, and add obs_type and weight fields"""
+        data.name = series_name
+        data = data.to_frame()
+        data["obs_type"] = obs_type
+        data["weight"] = weight
+        if other_col_data:
+            data = data.assign(**other_col_data)
+        return data
+
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         if self.models == {}:
@@ -228,27 +245,40 @@ class PestSolver(BaseSolver):
             if self.pcov is not None:
                 self.pcovs[self.ml.name] = self.pcov
         # observations
-        obs_list, obs_diffs_list, stress_obs_list = [], [], []
+        obs_list, obs_diffs_list, stress_obs_list, headsmp_obs_list = [], [], [], []
         for ml_name, ml in self.models.items():
             # heads
-            observations = ml.observations()
-            observations.name = "Observations"
-            observations = observations.to_frame()
-            observations["obs_type"] = "head"
-            observations["weight"] = 1.0
+            observations = PestSolver._setup_base_obs(
+                ml.observations(),
+                other_col_data={"model_name": ml_name},
+            )
             # head differences from previous
             if self.obs_diff:
                 obs_diffs = self._get_obs_diff(observations)
                 obs_diff_file = self.model_ws / f"simulation_head_diffs_{ml_name}.csv"
                 obs_diffs.Observations.to_csv(obs_diff_file, date_format="%d/%m/%Y")
                 copy_file(obs_diff_file, self.temp_ws)
-                obs_diffs.loc[:, "model_name"] = ml_name
                 obs_diffs_list.append(obs_diffs.copy())
             obs_file = self.model_ws / f"simulation_{ml_name}.csv"
             observations.Observations.to_csv(obs_file, date_format="%d/%m/%Y")
             copy_file(obs_file, self.temp_ws)
-            observations.loc[:, "model_name"] = ml_name
             obs_list.append(observations.copy())
+
+            # smp style zero-weight head obs of full timeseries. For plotting ensemble hydrographs from pestpp-ies stack.
+            # just monthly mean to avoid crazy big files; TODO: could make headsmp resampling an option for short sims.
+            ml.settings["tmin"] = None
+            ml.settings["tmax"] = None
+            headsmp_obs = PestSolver._setup_base_obs(
+                ml.simulate().resample("ME").mean(),
+                obs_type="headsmp",
+                weight=0.0,
+                other_col_data={"model_name": ml_name},
+            )
+            headsmp_obs.index.name = "date"
+            headsmp_obs_file = self.model_ws / f"simulation_{ml_name}.smp.csv"
+            headsmp_obs.Observations.to_csv(headsmp_obs_file, date_format="%d/%m/%Y")
+            copy_file(headsmp_obs_file, self.temp_ws)
+            headsmp_obs_list.append(headsmp_obs.copy())
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
@@ -282,6 +312,10 @@ class PestSolver(BaseSolver):
                         ignore_index=False)
                 )
             self.observations = pd.concat(ml_obs_list, ignore_index=False)
+
+        # smp style zero-weight head obs of full timeseries
+        headsmp_obs = pd.concat(headsmp_obs_list, ignore_index=False)
+        self.observations = pd.concat([self.observations, headsmp_obs], ignore_index=False)
 
         # setup parameters
         pars_list = []
@@ -501,6 +535,21 @@ class PestSolver(BaseSolver):
                     ml_name=ml_name,
                     obs_types=["headdiff"],
                 )
+
+            # smp-style zero-weight head obs
+            # usual pastas head obs
+            obsgp = f"headsmp_{ml_name}"
+            self.pf.add_observations(
+                f"simulation_{ml_name}.smp.csv",
+                index_cols=[self.observations.index.name],
+                use_cols=["Observations"],
+                obsgp=obsgp,
+            )
+            # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
+            self._update_observations_names(
+                ml_name=ml_name,
+                obs_types=["headsmp"],
+            )
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
@@ -923,7 +972,7 @@ class PestHpSolver(PestSolver):
         nfev: int | None = None,
         port_number: int = 4004,
         num_workers: int | None = None,
-        use_pypestworker: bool = True,
+        #TODO: use_pypestworker: bool = False, # need pest_hp version of pypestworker for this. TCP messaging differs.
         **kwargs,
     ) -> None:
         """
@@ -953,8 +1002,6 @@ class PestHpSolver(PestSolver):
             The port number for communication. Default is 4004.
         num_workers : int | None, optional
             The number of worker processes, by default the number of physical CPU cores.
-        use_pypestworker : bool, optional
-            Whether to use the PyPestWorker for Python processing. Default is True.
         **kwargs : dict
             Additional keyword arguments passed to the PestSolver.
 
@@ -962,6 +1009,8 @@ class PestHpSolver(PestSolver):
         -------
         None
         """
+        #TODO:        use_pypestworker : bool, optional
+        #    Whether to use the PyPestWorker for Python processing. Default is True.
         PestSolver.__init__(
             self,
             exe_name=exe_name,
@@ -973,7 +1022,7 @@ class PestHpSolver(PestSolver):
             noptmax=noptmax,
             control_data=control_data,
             port_number=port_number,
-            use_pypestworker=use_pypestworker,
+            use_pypestworker=False, # TODO: allow pypestworker with pest_hp. Need pest_hp version of pypestworker for this. TCP messaging differs.
             **kwargs,
         )
         master_ws = Path(master_ws).resolve()
