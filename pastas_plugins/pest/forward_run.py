@@ -194,8 +194,8 @@ def run_pypestworker(
             obs_diffs = concat(obs_diffs_list, axis=0, ignore_index=False)
             obsvals_all = concat([obsvals_all, obs_diffs], axis=0, ignore_index=False)
         if len(stress_obs_list) > 0:
-            stress_obs = concat(stress_obs_list, axis=0, ignore_index=False)
-            obsvals_all = concat([obsvals_all, stress_obs], axis=0, ignore_index=False)
+            stress_obs_all = concat(stress_obs_list, axis=0, ignore_index=False)
+            obsvals_all = concat([obsvals_all, stress_obs_all], axis=0, ignore_index=False)
 
         ppw.send_observations(obsvals=obsvals_all)
 
