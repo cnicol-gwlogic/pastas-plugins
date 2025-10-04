@@ -45,6 +45,7 @@ class PestSolver(BaseSolver):
         stressmodel_parameterisers: Optional[list | None] = None,
         obs_diff: Optional[bool] = False,
         phi_factors: Optional[dict] = {},
+        covary_multimodels_constant_d: bool = True,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -91,7 +92,13 @@ class PestSolver(BaseSolver):
         -------
         None
         """
-
+        """ TODO (MAYBE) 
+        covary_multimodels_constant_d : bool, optional
+            Whether to apply Pastas constant_d parameter covariance between models in solver.models.
+            Covariance calculated by distance, using model.oseries.metadata "x" and "y" coord keys.
+            Variance (along the diagonal) is as calculated internally for parameters regardless of this option
+            (via stdev of parbounds / 4, i.e.,  an assumed 95% CI).
+        """
         def __getstate__(self):
             # Exclude the logger and its handlers from the state to be pickled
             state = self.__dict__.copy()
@@ -132,6 +139,7 @@ class PestSolver(BaseSolver):
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
         self.obs_diff: bool = obs_diff
         self.phi_factors: dict = phi_factors
+        # TODO MAYBE self.covary_multimodels_constant_d: bool = covary_multimodels_constant_d
 
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
@@ -667,7 +675,10 @@ class PestSolver(BaseSolver):
         if isinstance(self, PestIesSolver):
             if self.pcovs != {}:
                 unc_str = ""
-                for ml_name, pcov in self.pcovs.items():
+                for ml_idx, (ml_name, pcov) in enumerate(self.pcovs.items()):
+                    new_pnames = [f"m{str(ml_idx).zfill(2)}{p}" for p in pcov.index]
+                    pcov.columns = new_pnames
+                    pcov.index = new_pnames
                     pastas_parcov = pyemu.Cov(
                         x=pcov.values,
                         names=pcov.columns,
