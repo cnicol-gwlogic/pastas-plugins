@@ -1209,6 +1209,7 @@ class PestIesSolver(PestSolver):
         observation_noise_correlation_coefficient: float = 0.0,
         ies_parameter_ensemble_method: Literal["norm", "truncnorm", "uniform"]
         | None = None,
+        noise_by_obsnme_tag: Optional[DataFrame | None] = None,
         pestpp_options: dict[str, Any] | None = None,
         silent: bool = False,
     ) -> None:
@@ -1231,6 +1232,9 @@ class PestIesSolver(PestSolver):
         ies_parameter_ensemble_method : Literal["norm", "truncnorm", "uniform"] | None, optional
             The method to distribution of the prior for the parameter ensemble, by default None.
             If None the parameter distribution is drawn by pestpp-ies itself.
+        noise_by_obsnme_tag : [DataFrame | None], optional
+            Dataframe of obs noise standard deviations. Indexed by obsnme partial str match tags,
+            with two columns: 'value' and 'noise_type' ['absolute' or 'relative']. Default is None.
         pestpp_options : dict | None, optional
             Additional PEST++ options, by default None.
         Returns
@@ -1245,8 +1249,16 @@ class PestIesSolver(PestSolver):
         pst.pestpp_options["ies_num_reals"] = self.ies_num_reals
         pst.pestpp_options["ies_add_base"] = ies_add_base
         pst.pestpp_options["par_sigma_range"] = par_sigma_range
-        if observation_noise_standard_deviation == 0.0:
+        if observation_noise_standard_deviation == 0.0 and noise_by_obsnme_tag is None:
             pst.pestpp_options["ies_no_noise"] = True
+        elif noise_by_obsnme_tag is not None:
+            noise_file = self.write_ensemble_observation_noise_by_obsnme_tag(
+                noise_by_obsnme_tag,
+                pst.observation_data,
+                ies_add_base=ies_add_base,
+            )
+            pst.pestpp_options["ies_observation_ensemble"] = noise_file
+            pst.pestpp_options.pop("ies_no_noise", False)
         else:
             self.write_ensemble_observation_noise(
                 standard_deviation=observation_noise_standard_deviation,
@@ -1255,6 +1267,7 @@ class PestIesSolver(PestSolver):
             pst.pestpp_options["ies_observation_ensemble"] = (
                 "pest_starting_obs_ensemble.csv"
             )
+            pst.pestpp_options.pop("ies_no_noise", False)
         if ies_parameter_ensemble_method is not None:
             self.write_ensemble_parameter_distribution(
                 method=ies_parameter_ensemble_method,
@@ -1505,6 +1518,75 @@ class PestIesSolver(PestSolver):
             ].values
             par_df = par_df.rename(index={self.ies_num_reals - 1: "base"})
         par_df.to_csv(self.temp_ws / "pest_starting_par_ensemble.csv")
+
+    def write_ensemble_observation_noise_by_obsnme_tag(
+            self,
+            noise_by_obsnme_tag: DataFrame,
+            obs_data: DataFrame,
+            ies_add_base: bool = True,
+    ):
+        """
+        Generate and write an ensemble of observation noise to a CSV file, based on options contained in
+        the noise_by_obsnme_tag DataFrame, which is indexed by obsnme partial string match tags.
+
+        Parameters
+        ----------
+        noise_by_obsnme_tag: DataFrame
+            DataFrame, which is indexed by obsnme partial string match tags.
+            Columns are 'value', 'noise_type' ['absolute' or 'relative' (to mean of obs values)],
+            'correlation coefficient' (of noise; 0-->1), 'minobsval' and 'maxobsval' (leave null if not wanted).
+        obs_data : DataFrame
+            Pyemu.Pst.observation_data DataFrame.
+        ies_add_base : bool, optional
+            If True, add the base observation values to the ensemble. Default
+            is True.
+
+        Returns
+        -------
+        noise_file : str
+        The path to the noise file. Needs to be specified in the pst control file.
+        """
+        obs_plus_noise_list = []
+        for otag, row in noise_by_obsnme_tag.iterrows():
+            obsvals = obs_data.loc[obs_data.index.to_series().str.contains(otag)].obsval
+            if row.noise_type == "relative":
+                stdev = row.value * obsvals.mean()
+            else: # absolute
+                stdev = row.value
+            noise = PestIesSolver.generate_observation_noise(
+                ies_num_reals=self.ies_num_reals,
+                nobs=len(obsvals.index),
+                standard_deviation=stdev,
+                correlation_coefficient=row.correlation_coefficient,
+                seed=pyemu.en.SEED,
+            )
+            obs_plus_noise = obsvals.to_frame().values + noise
+            if not np.isnan(row.minobsval):
+                obs_plus_noise = np.maximum(obs_plus_noise, row.minobsval)
+            if not np.isnan(row.maxobsval):
+                obs_plus_noise = np.minimum(obs_plus_noise, row.maxobsval)
+            obs_noise_df = pd.DataFrame(
+                obs_plus_noise,
+                index=obsvals.index,
+                columns=pd.Index(range(self.ies_num_reals)),
+            ).transpose()
+            if ies_add_base:
+                obs_noise_df.loc[self.ies_num_reals - 1] = obsvals
+                obs_noise_df = obs_noise_df.rename(index={self.ies_num_reals - 1: "base"})
+            obs_plus_noise_list.append(
+                obs_noise_df.copy()
+            )
+
+        obs_noise_df = pd.concat(obs_plus_noise_list, axis=1, ignore_index=False)
+        # check for obsnmes not in noise ens, and add those with zero noise
+        missing_obsnmes = obs_data.index[~obs_data.index.isin(obs_noise_df.columns)]
+        obs_noise_df.loc[:, missing_obsnmes] = obs_data.loc[missing_obsnmes].obsval.values
+        obs_noise_df = obs_noise_df.loc[:, obs_data.index] # reorder per pst file
+        # save the noise ensemble and add to control file
+        noise_file = self.temp_ws / "pest_starting_obs_ensemble.csv"
+        obs_noise_df.to_csv(noise_file)
+
+        return noise_file
 
     def write_ensemble_observation_noise(
         self,
