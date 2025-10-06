@@ -274,10 +274,11 @@ class PestSolver(BaseSolver):
 
             # smp style zero-weight head obs of full timeseries. For plotting ensemble hydrographs from pestpp-ies stack.
             # just monthly mean to avoid crazy big files; TODO: could make headsmp resampling an option for short sims.
-            ml.settings["tmin"] = None
-            ml.settings["tmax"] = None
             headsmp_obs = PestSolver._setup_base_obs(
-                ml.simulate().resample("ME").mean(),
+                ml.simulate(
+                    tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                    tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                ).resample("ME").mean(),
                 obs_type="headsmp",
                 weight=0.0,
                 other_col_data={"model_name": ml_name},
