@@ -53,6 +53,7 @@ def run() -> None:
     # simulate
     for ml in models:
         ml_name = ml.name
+        ml.settings["tmax"] = None
         simulation = ml.simulate()
         simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y")
 
@@ -126,7 +127,6 @@ def run_pypestworker(
             if og.find("headdiff") >= 0
         ]
         for ml_name,ml in models.items():
-            ml.settings["tmin"] = None
             ml.settings["tmax"] = None
             # update standard pastas model parameters
             for pname, val in pvals.items():

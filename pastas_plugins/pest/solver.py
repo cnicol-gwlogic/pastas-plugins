@@ -373,6 +373,8 @@ class PestSolver(BaseSolver):
         self.parameters = parameters
 
         # model
+        for p in Path(self.model_ws).glob("*.pas"):
+            p.unlink()
         for ml_idx, (ml_name, ml) in enumerate(self.models.items()):
             ml_file = self.model_ws / f"model_{str(ml_idx).zfill(2)}.pas"
             self.models[ml_name].to_file(ml_file)
