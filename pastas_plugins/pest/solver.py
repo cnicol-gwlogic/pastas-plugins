@@ -254,7 +254,8 @@ class PestSolver(BaseSolver):
                 self.pcovs[self.ml.name] = self.pcov
         # observations
         obs_list, obs_diffs_list, stress_obs_list, headsmp_obs_list = [], [], [], []
-        for ml_name, ml in self.models.items():
+        for ml_idx, (ml_name, ml) in enumerate(self.models.items()):
+            ml.oseries.metadata.update({"ml_code": f"m{str(ml_idx).zfill(2)}"})
             # heads
             observations = PestSolver._setup_base_obs(
                 ml.observations(),
@@ -362,7 +363,8 @@ class PestSolver(BaseSolver):
             parameters["pmax"] = ml.parameters.loc[
                 self.vary_by_model[ml_name], "pmax"
             ].values
-            parameters.index = [f"m{str(ml_idx).zfill(2)}{p}" for p in parameters.index]
+            ml_code = ml.oseries.metadata["ml_code"]
+            parameters.index = [f"m{ml_code}{p}" for p in parameters.index]
             pars_list.append(parameters.copy())
         parameters = pd.concat(pars_list, ignore_index=False)
         parameters.index.name = "parnames"
@@ -375,8 +377,9 @@ class PestSolver(BaseSolver):
         # model
         for p in Path(self.model_ws).glob("*.pas"):
             p.unlink()
-        for ml_idx, (ml_name, ml) in enumerate(self.models.items()):
-            ml_file = self.model_ws / f"model_{str(ml_idx).zfill(2)}.pas"
+        for ml_name, ml in self.models.items():
+            ml_code = ml.oseries.metadata["ml_code"]
+            ml_file = self.model_ws / f"model_{ml_code}.pas"
             self.models[ml_name].to_file(ml_file)
             copy_file(ml_file, self.temp_ws)
 

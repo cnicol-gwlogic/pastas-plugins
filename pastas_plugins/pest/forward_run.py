@@ -20,17 +20,16 @@ def run() -> None:
     fpath = Path(__file__).parent
 
     # load pastas model
-    model_files = [Path(m).name for m in glob.glob(str(fpath / "model_*.pas"))]
     models = [load_model(m) for m in glob.glob(str(fpath / "model_*.pas"))]
 
     # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
-    for ml_fname, ml in zip(model_files, models):
-        ml_code = f"m{ml_fname.split('_')[-1].replace('.pas','')}"
+    for ml in models:
+        ml_code = ml.oseries.metadata["ml_code"]
         for pname, val in parameters.loc[:, "optimal"].items():
             pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-            if pname[3:] in ml.parameters.index.values and ml_code == pname[:3]:
-                ml.set_parameter(pname[3:], optimal=val)
+            if pname[len(ml_code):] in ml.parameters.index.values and ml_code == pname[:len(ml_code)]:
+                ml.set_parameter(pname[len(ml_code):], optimal=val)
     # update custom stressmodel parameters
     pickles = glob.glob(str(fpath / "*.parameteriser.pkl"))
     stressmodel_parameterisers = [
@@ -128,15 +127,15 @@ def run_pypestworker(
             og for og in observation_index.index.get_level_values("obgnme").unique() \
             if og.find("headdiff") >= 0
         ]
-        for ml_idx, (ml_name,ml) in enumerate(models.items()):
+        for ml_name, ml in models.items():
             ml.settings["tmax"] = None
-            ml_code = f"m{str(ml_idx).zfill(2)}"
+            ml_code = ml.oseries.metadata["ml_code"]
             # update standard pastas model parameters
             for pname, val in pvals.items():
                 pname = parameter_index[pname]
                 pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
-                if pname[3:] in ml.parameters.index.values and pname[:3] == ml_code:
-                    ml.set_parameter(pname[3:], optimal=val)
+                if pname[len(ml_code):] in ml.parameters.index.values and pname[:len(ml_code)] == ml_code:
+                    ml.set_parameter(pname[len(ml_code):], optimal=val)
             # update stress TimeSeries
             for sm_p in stressmodel_parameterisers:
                 smodel = ml.stressmodels.get(sm_p.stressmodel_name)
