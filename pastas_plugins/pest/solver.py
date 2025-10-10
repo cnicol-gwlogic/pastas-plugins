@@ -1215,6 +1215,7 @@ class PestIesSolver(PestSolver):
         observation_noise_correlation_coefficient: float = 0.0,
         ies_parameter_ensemble_method: Literal["norm", "truncnorm", "uniform"]
         | None = None,
+        ies_parameter_ensemble: Optional[str | None] = None,
         noise_by_obsnme_tag: Optional[DataFrame | None] = None,
         pestpp_options: dict[str, Any] | None = None,
         silent: bool = False,
@@ -1238,6 +1239,9 @@ class PestIesSolver(PestSolver):
         ies_parameter_ensemble_method : Literal["norm", "truncnorm", "uniform"] | None, optional
             The method to distribution of the prior for the parameter ensemble, by default None.
             If None the parameter distribution is drawn by pestpp-ies itself.
+        ies_parameter_ensemble : [str | None], optional
+            Optional prior parameter ensemble to pass to pestpp-ies via control file keyword ies_parameter_ensemble.
+            Useful for batch running a pre-developed / optimised stack. Default is None.
         noise_by_obsnme_tag : [DataFrame | None], optional
             Dataframe of obs noise standard deviations. Indexed by obsnme partial str match tags,
             with two columns: 'value' and 'noise_type' ['absolute' or 'relative']. Default is None.
@@ -1282,6 +1286,10 @@ class PestIesSolver(PestSolver):
             )
             pst.pestpp_options["ies_parameter_ensemble"] = (
                 "pest_starting_par_ensemble.csv"
+            )
+        if ies_parameter_ensemble is not None:
+            pst.pestpp_options["ies_parameter_ensemble"] = (
+                ies_parameter_ensemble
             )
 
         # add a user-provided pcov (eg from an initial leastsquares solve)
