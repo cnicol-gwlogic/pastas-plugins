@@ -1,14 +1,14 @@
 import pyemu
-from pandas import DataFrame
+from pandas import DataFrame, Series
 
 
 def run() -> None:
     # load packages
-    import glob
     from pathlib import Path
 
-    import dill  # pickle
-    from pandas import read_csv
+    from dill import load as dill_load  # pickle
+    from gzip import open as gz_open
+    from pandas import read_csv, concat
     from pastas.io.base import load as load_model
 
     from pastas_plugins.pest.parameterisers import (  # noqa: F401
@@ -20,7 +20,13 @@ def run() -> None:
     fpath = Path(__file__).parent
 
     # load pastas model
-    models = [load_model(m) for m in glob.glob(str(fpath / "model_*.pas"))]
+    models = [load_model(m) for m in Path(fpath).glob("model_*.pas")]
+
+    # load save_stress_contributions
+    save_stress_contributions = False
+    if Path("stress_contribution_groups.csv").exists():
+        save_stress_contributions = True
+        stress_contribution_groups = read_csv("stress_contribution_groups.csv", index_col=[0,1,2])
 
     # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
@@ -31,9 +37,9 @@ def run() -> None:
             if pname[len(ml_code):] in ml.parameters.index.values and ml_code == pname[:len(ml_code)]:
                 ml.set_parameter(pname[len(ml_code):], optimal=val)
     # update custom stressmodel parameters
-    pickles = glob.glob(str(fpath / "*.parameteriser.pkl"))
+    pickles = Path(fpath).glob("*.parameteriser.pkl.gz")
     stressmodel_parameterisers = [
-        dill.load(open(sm_p, "rb")) for sm_p in pickles
+        dill_load(gz_open(sm_p)) for sm_p in pickles
     ]  # pickle.load(
     for sm_p in stressmodel_parameterisers:
         # get df of updated (parameterised and interpolated) stress TimeSeries for model
@@ -55,7 +61,10 @@ def run() -> None:
     for ml in models:
         ml_name = ml.name
         ml.settings["tmax"] = None
-        simulation = ml.simulate()
+        simulation = ml.simulate(
+            tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+            tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+        )
         simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y")
 
         # save head_diffs too
@@ -72,6 +81,31 @@ def run() -> None:
                 stress_mod = sm_p.mod2obs()
                 stress_mod.to_csv(f"{sm_p.stressmodel_name}.stress_obs.csv", date_format=sm_p.date_format)
 
+        # stress contributions
+        if save_stress_contributions:
+            contribs_all = ml.get_contributions(
+                split=True,
+                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+            ) # all contributions
+            contribs_all = [s.resample("ME").mean() for s in contribs_all] # downsample from daily. Should make this an option...
+            contribs_all = concat(contribs_all, axis=1, ignore_index=False)
+            ml_stress_groups = stress_contribution_groups.xs(ml_name)
+            for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
+                istress_groups = ml_stress_groups.xs(sm_name)
+                for label, istress_names in istress_groups.groupby(level=0):
+                    names = istress_groups.xs(label).values.flatten()
+                    # aggregate selected groups of istress contributions
+                    contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            contribs_all.index.name = "date"
+            contribs_all = contribs_all.reset_index(drop=False).melt(
+                id_vars="date",
+                value_vars=contribs_all.columns,
+                var_name="column_names",
+                value_name="Observations",
+            ).set_index(["column_names","date"])
+            contribs_all.to_csv(fpath / f"simulation_stress_contributions_{ml_name}.csv", date_format="%d/%m/%Y")
+
 def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
@@ -81,6 +115,8 @@ def run_pypestworker(
     observation_index: DataFrame,
     stressmodel_parameterisers: list = [],
     stress_obs: DataFrame | None = None,
+    save_stress_contributions: bool = False,
+    stress_contribution_groups: Series | None = None,
 ) -> None:
     from logging import getLogger
 
@@ -97,9 +133,6 @@ def run_pypestworker(
         verbose=False,
     )
 
-    # load pastas model
-    # ml = _load_model(ml_dict)  # load_model(ml_file)
-
     pvals = ppw.get_parameters()
     if pvals is None:
         return None
@@ -114,7 +147,7 @@ def run_pypestworker(
             interp_kwargs["updated_sourcevals"] = new_par_values
             updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
 
-        obsvals_list, obs_diffs_list, stress_obs_list, headsmp_list = [], [], [], []
+        obsvals_list, obs_diffs_list, stress_obs_list, headsmp_list, contribs_all_list = [], [], [], [], []
         head_obsgps = [
             og for og in observation_index.index.get_level_values("obgnme").unique() \
             if og.find("head_") >= 0
@@ -146,7 +179,10 @@ def run_pypestworker(
                                 :, stress_series.name
                             ]
             # run simulation
-            sim = ml.simulate()
+            sim = ml.simulate(
+                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+            )
 
             # get head obs
             obs = observation_index.xs(ml.name)
@@ -179,15 +215,50 @@ def run_pypestworker(
             headsmp_list.append(sim_smp_vals) #f"simulation_{ml_name}.smp.csv"
 
             # stress obs
+            stress_obs_rates = stress_obs.loc[stress_obs.obs_type == "stress_obs"]
             if stress_obs is not None:
                 for sm_p in stressmodel_parameterisers:
                     if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
                         stress_mod = sm_p.mod2obs()
                         # reindex with pest obsnme
-                        obsnmes = stress_obs.loc[stress_mod.index].obsnme
-                        stress_mod.index = obsnmes
+                        obsnmes = stress_obs_rates.loc[stress_mod.index].obsnme
+                        stress_mod.index = obsnmes.values
                         # store the series
                         stress_obs_list.append(stress_mod)
+
+            # stress contributions
+            if save_stress_contributions:
+                stress_obs_contribs = stress_obs.loc[
+                    (stress_obs.obs_type=="stress_contribution") & \
+                    (stress_obs.model_name == ml.name)
+                    ]
+                contribs_all = ml.get_contributions(
+                    split=True,
+                    tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                    tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                )  # all contributions
+                contribs_all = [s.resample("ME").mean() for s in
+                                contribs_all]  # downsample from daily. Should make this an option...
+                contribs_all = concat(contribs_all, axis=1, ignore_index=False)
+                ml_stress_groups = stress_contribution_groups.xs(ml_name)
+                for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
+                    istress_groups = ml_stress_groups.xs(sm_name)
+                    for label, istress_names in istress_groups.groupby(level=0):
+                        names = istress_groups.xs(label).values.flatten()
+                        # aggregate selected groups of istress contributions
+                        contribs_all.loc[:, label] = contribs_all.loc[:, names].sum(axis=1)
+                # melt from xtab to flat array and save
+                contribs_all.index.name = "date"
+                contribs_all = contribs_all.reset_index(drop=False).melt(
+                    id_vars="date",
+                    value_vars=contribs_all.columns,
+                    var_name="column_names",
+                    value_name="Observations",
+                ).set_index(["column_names", "date"])
+                obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
+                contribs_all.index = obsnmes.values
+                # store the series
+                contribs_all_list.append(contribs_all)
 
         obsvals_all = concat(obsvals_list, axis=0, ignore_index=False)
         sim_smp_vals = concat(headsmp_list, axis=0, ignore_index=False)
@@ -198,6 +269,9 @@ def run_pypestworker(
         if len(stress_obs_list) > 0:
             stress_obs_all = concat(stress_obs_list, axis=0, ignore_index=False)
             obsvals_all = concat([obsvals_all, stress_obs_all], axis=0, ignore_index=False)
+        if len(contribs_all_list) > 0:
+            contribs_all = concat(contribs_all_list, axis=0, ignore_index=False)
+            obsvals_all = concat([obsvals_all, contribs_all], axis=0, ignore_index=False)
 
         ppw.send_observations(obsvals=obsvals_all)
 

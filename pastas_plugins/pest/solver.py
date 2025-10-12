@@ -1,4 +1,4 @@
-import json
+import json, shutil
 import logging
 from collections.abc import Callable
 from copy import deepcopy
@@ -9,6 +9,7 @@ from shutil import copy as copy_file
 from typing import Any, Literal, Optional
 
 import dill  # pickle
+import gzip
 import numpy as np
 import pandas as pd
 import pyemu
@@ -44,6 +45,8 @@ class PestSolver(BaseSolver):
         add_tikhonov_reg: Optional[bool] = False,
         stressmodel_parameterisers: Optional[list | None] = None,
         obs_diff: Optional[bool] = False,
+        save_stress_contributions: Optional[bool] = False,
+        stress_contribution_groups: Optional[Series | None] = None,
         phi_factors: Optional[dict] = {},
         covary_multimodels_constant_d: bool = True,
         **kwargs,
@@ -82,9 +85,20 @@ class PestSolver(BaseSolver):
             Whether to apply preferred-value regularisation in the pest control file.
             Default is False.
         stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.BaseParameteriser] | None, optional
-            Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST. Default is None.
+            Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST.
+            Default is None.
         obs_diff : bool, optional
             Option to calibrate to head differences from previous head. Default is False.
+        save_stress_contributions : bool, optional
+            Whether to save stressmodel contributions to pest obs_data file (zero-weighted).
+        Series, optional
+            Series multi-indexed by: [Pastas model name, stressmodel name, label string]. Values ("istress_names")
+            contain stress names for which stress contributions are summed for each model/stressmodel/label key.
+            Default is None.
+        phi_factors : dict, optional
+            Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
+            via weighting the prior. Default is an empty dict (no phi factors applied in pest). NOTE: This is
+            not yet supported for GLM/HP - only IES.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
@@ -138,6 +152,8 @@ class PestSolver(BaseSolver):
         self.add_tikhonov_reg: bool = add_tikhonov_reg
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
         self.obs_diff: bool = obs_diff
+        self.save_stress_contributions = save_stress_contributions
+        self.stress_contribution_groups = stress_contribution_groups
         self.phi_factors: dict = phi_factors
         # TODO MAYBE self.covary_multimodels_constant_d: bool = covary_multimodels_constant_d
 
@@ -146,6 +162,29 @@ class PestSolver(BaseSolver):
         self.pcovs = {}  # dict of pcovs {model.name: pcov} for each model to be solved by pest simultaneously
 
         self.stress_obs = None
+
+    @property
+    def stress_contribution_groups(self) -> DataFrame:
+        return self._stress_contribution_groups
+
+    @stress_contribution_groups.setter
+    def stress_contribution_groups(
+            self, stress_contribution_groups
+    ) -> None:
+        if stress_contribution_groups is not None:
+            self._stress_contribution_groups = stress_contribution_groups.sort_index(level=[0, 1, 2])
+            self._stress_contribution_groups.index = self._stress_contribution_groups.index.set_levels(
+                self._stress_contribution_groups.index.levels[2].str.replace(" ", ""),
+                level=2
+            ) # we need spaces removed because pyemu will do this too,
+            #   and we need to be able to link between pyemu names and these user-provided labels
+            self._stress_contribution_groups.index.names = ['ml_name', 'sm_name','label']
+            self._stress_contribution_groups.name = "istress_names"
+        else:
+            self._stress_contribution_groups = pd.Series(
+                index=pd.MultiIndex.from_tuples([], names=['ml_name', 'sm_name','label']),
+                name="istress_names",
+            )
 
     def add_model(
             self,
@@ -246,6 +285,54 @@ class PestSolver(BaseSolver):
             data = data.assign(**other_col_data)
         return data
 
+    def _get_stressmodel_contributions(self):
+        """
+        Returns a DataFrame with all stressmodel contributions specified through stress_contribution_groups parameter
+        """
+        # stress contributions
+        self.sm_contribs = DataFrame()
+        sm_contribs_list = []
+        self.stress_contribution_groups.to_csv(self.model_ws / "stress_contribution_groups.csv")
+        copy_file(self.model_ws / "stress_contribution_groups.csv", self.temp_ws)
+        for fp in Path(self.model_ws).glob("simulation_stress_contributions_*.csv"):
+            fp.unlink(missing_ok=True)
+        for ml_name, ml in self.models.items():
+            # get all stress contributions for each model at a minimum.
+            contribs_all = ml.get_contributions(
+                split=True,
+                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+            )  # all contributions
+            contribs_all = [s.resample("ME").mean() for s in
+                            contribs_all]  # downsample from daily. Should make this an option...
+            contribs_all = pd.concat(contribs_all, axis=1, ignore_index=False)
+            # if stress_contribution_groups are user-provided, sum those stress contributions up too.
+            ml_stress_groups = self.stress_contribution_groups.xs(ml_name)
+            for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
+                istress_groups = ml_stress_groups.xs(sm_name)
+                for label, istress_names in istress_groups.groupby(level=0):
+                    names = istress_groups.xs(label).values.flatten()
+                    # aggregate selected groups of istress contributions
+                    contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            # melt from xtab to flat array and save
+            contribs_all.index.name = "date"
+            contribs_all = contribs_all.reset_index(drop=False).melt(
+                id_vars="date",
+                value_vars=contribs_all.columns,
+                var_name="column_names",
+                value_name="Observations",
+            ).set_index(["column_names","date"])
+            contribs_file = Path(self.model_ws / f"simulation_stress_contributions_{ml_name}.csv")
+            contribs_all.to_csv(contribs_file, date_format="%d/%m/%Y")
+            copy_file(contribs_file, self.temp_ws)
+            contribs_all.loc[:, "model_name"] = ml_name
+            contribs_all.loc[:, "obs_type"] = "stress_contribution"
+            contribs_all.loc[:, "weight"] = 0.0
+            sm_contribs_list.append(contribs_all)
+        # merge all models' data together
+        sm_contribs = pd.concat(sm_contribs_list, ignore_index=False)
+        return sm_contribs
+
     def setup_model(self):
         """Setup and export Pastas model for PEST optimization"""
         if self.models == {}:
@@ -327,6 +414,14 @@ class PestSolver(BaseSolver):
         headsmp_obs = pd.concat(headsmp_obs_list, ignore_index=False)
         self.observations = pd.concat([self.observations, headsmp_obs], ignore_index=False)
 
+        # stressmodel contributions
+        # ensure we remove stress_contribution_groups.csv so forward_run can use its existence
+        # to define bool save_stress_contributions (non pypestworker runs)
+        Path(self.model_ws / "stress_contribution_groups.csv").unlink(missing_ok=True)
+        if self.save_stress_contributions:
+            self.sm_contribs = self._get_stressmodel_contributions()
+        self.stress_obs = pd.concat([self.stress_obs, self.sm_contribs], ignore_index=False)
+
         # setup parameters
         pars_list = []
         self.vary = []
@@ -400,6 +495,7 @@ class PestSolver(BaseSolver):
             ml_name: str,
             obs_types: list,
             date_format="%d/%m/%Y",
+            rsplit_column_name=True,
     ) -> None:
         """
         Add pest obsnme and obgnme to self.stress_obs dataframe. Designed to be called
@@ -412,21 +508,30 @@ class PestSolver(BaseSolver):
                 lambda x: x.rsplit("_date:")[0].rsplit("_column_names:", 1)[-1]
             )
         )
-        tmp_obs["column_names"] = tmp_obs.column_names.apply(
-            lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1].upper()}"
-        )
+        if rsplit_column_name:
+            tmp_obs["column_names"] = tmp_obs.column_names.apply(
+                lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1]}"
+            ) # these are lower case because pest obsnme is (from which column_names is derived - above)
         omask = (self.stress_obs.model_name == ml_name) & \
                 (self.stress_obs.obs_type.isin(obs_types))
-        join_obs = self.stress_obs.loc[omask]
+        join_obs = self.stress_obs.loc[omask].copy()
+        og_index0 = join_obs.index.levels[0]
+        join_obs.index = join_obs.index.set_levels(
+            join_obs.index.levels[0].str.lower(),
+            level="column_names"
+        ) # because pest obsnme-derived column_names is lower case
         try:
             join_obs = join_obs.drop(columns=["obsnme","obgnme"])
         except: # if the cols don't exist (on first use of this function) we get an exception
             pass
-        self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.join(
+        join_obs = join_obs.join(
             tmp_obs[["column_names", "date", "obsnme", "obgnme"]].set_index(["column_names", "date"]), how="left"
-        ).loc[:,["obsnme","obgnme"]]
+        )
+        join_obs.index = join_obs.index.set_levels(
+            og_index0, level="column_names",
+        ) # revert index column_names to og case
+        self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.loc[:,["obsnme","obgnme"]]
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].set_index("obsnme").weight
-        tmp_obs = None
 
     def _update_observations_names(
             self,
@@ -451,7 +556,7 @@ class PestSolver(BaseSolver):
             pass
         self.observations.loc[omask, ["obsnme","obgnme"]] = join_obs.join(
             tmp_obs[["date", "obsnme", "obgnme"]].set_index("date"), how="left"
-        ).loc[:,["obsnme","obgnme"]]
+        ).loc[:,["obsnme","obgnme"]] # joining by date works because this is used for head obs, and we do this per bore (per pastas.simulation.csv file)
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.observations.loc[omask].set_index("obsnme").weight
         tmp_obs = None
 
@@ -493,12 +598,14 @@ class PestSolver(BaseSolver):
 
         # add custom stressmodel parameters
         if self.stressmodel_parameterisers:
+            for fp in Path(self.temp_ws).glob("*.parameteriser.pkl.gz"):
+                Path(fp).unlink(missing_ok=True)
             for sm_p in self.stressmodel_parameterisers:
                 sm_p.solver = self
                 sm_p.add_stress_parameters(par_name_base="sm")
                 # pickle to disk for pest non-pypestworker workers
-                fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl"
-                with open(fname, "wb") as f:
+                fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl.gz"
+                with gzip.open(fname, "wb") as f:
                     dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
                 parnmes = sm_p.source_points.parnme.values
@@ -565,6 +672,23 @@ class PestSolver(BaseSolver):
                 obs_types=["headsmp"],
             )
 
+            # stress contributions
+            for sm_name, istress_groups in self.stress_contribution_groups.xs(ml_name, level=0).groupby(level=0):
+                obsgp = f"stress_contrib_{ml_name}"
+                self.pf.add_observations(
+                    f"simulation_stress_contributions_{ml_name}.csv",
+                    index_cols=["column_names","date"],
+                    use_cols=["Observations"],
+                    obsgp=obsgp,
+                )
+                # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
+                self._update_stress_obs_names(
+                    ml_name=ml_name,
+                    obs_types=["stress_contribution"],
+                    date_format="%d/%m/%Y",
+                    rsplit_column_name=False,
+                )
+
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
             if sm_p.obs_data is not None:
@@ -599,8 +723,9 @@ class PestSolver(BaseSolver):
                 phi_factor_file, header=None
             )
             pst.pestpp_options.update({"ies_phi_factor_file": Path(phi_factor_file).name})
-        else:
-            # TODO: manually edit weights based on initial simulation residuals (pest_hp cases)
+        elif self.phi_factors != {}:
+            # TODO: manually edit weights based on initial simulation residuals (pest_hp / glm cases)
+            logger.warning("Phi factor prior weighting for PEST-HP / PESTPP-GLM is not yet supported.")
             pass
 
         # pastas model parameter bounds
@@ -747,6 +872,11 @@ class PestSolver(BaseSolver):
             }
         ).set_index(["model_name","obgnme","date"])
         self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
+
+        self.stress_obs.to_csv(Path(self.model_ws / "stress_obs.csv"), date_format="%d/%m/%Y")
+        copy_file(Path(self.model_ws / "stress_obs.csv"), self.temp_ws)
+        self.observations.to_csv(Path(self.model_ws / "observations.csv"), date_format="%d/%m/%Y")
+        copy_file(Path(self.model_ws / "observations.csv"), self.temp_ws)
 
     def run(self, arg_str: str = "", silent: bool = False):
         pyemu.os_utils.run(
@@ -938,6 +1068,8 @@ class PestGlmSolver(PestSolver):
                     "observation_index": self.observation_index,
                     "stressmodel_parameterisers": self.stressmodel_parameterisers,
                     "stress_obs": self.stress_obs,
+                    "save_stress_contributions": self.save_stress_contributions,
+                    "stress_contribution_groups": self.stress_contribution_groups,
                 }
                 if self.use_pypestworker
                 else {},  # the arguments to pass to the ppw_function
@@ -1096,6 +1228,8 @@ class PestHpSolver(PestSolver):
                 "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
                 "stress_obs": self.stress_obs,
+                "save_stress_contributions": self.save_stress_contributions,
+                "stress_contribution_groups": self.stress_contribution_groups,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
@@ -1215,7 +1349,7 @@ class PestIesSolver(PestSolver):
         observation_noise_correlation_coefficient: float = 0.0,
         ies_parameter_ensemble_method: Literal["norm", "truncnorm", "uniform"]
         | None = None,
-        ies_parameter_ensemble: Optional[str | None] = None,
+        ies_parameter_ensemble: Optional[DataFrame | None] = None,
         noise_by_obsnme_tag: Optional[DataFrame | None] = None,
         pestpp_options: dict[str, Any] | None = None,
         silent: bool = False,
@@ -1239,8 +1373,9 @@ class PestIesSolver(PestSolver):
         ies_parameter_ensemble_method : Literal["norm", "truncnorm", "uniform"] | None, optional
             The method to distribution of the prior for the parameter ensemble, by default None.
             If None the parameter distribution is drawn by pestpp-ies itself.
-        ies_parameter_ensemble : [str | None], optional
-            Optional prior parameter ensemble to pass to pestpp-ies via control file keyword ies_parameter_ensemble.
+        ies_parameter_ensemble : dict[DataFrame,bool] | None, optional
+            Optional DataFrame of prior parameter ensemble.
+            This par ens is passed to pestpp-ies via control file keyword ies_parameter_ensemble.
             Useful for batch running a pre-developed / optimised stack. Default is None.
         noise_by_obsnme_tag : [DataFrame | None], optional
             Dataframe of obs noise standard deviations. Indexed by obsnme partial str match tags,
@@ -1258,6 +1393,8 @@ class PestIesSolver(PestSolver):
         pst = pyemu.Pst(str(self.temp_ws / "pest.pst"))
         pst.pestpp_options["ies_num_reals"] = self.ies_num_reals
         pst.pestpp_options["ies_add_base"] = ies_add_base
+        ies_save_binary = eval(str(pestpp_options.get("ies_save_binary", False)).title())
+        ies_ens_ext = ".jcb" if ies_add_base else ".csv"
         pst.pestpp_options["par_sigma_range"] = par_sigma_range
         if observation_noise_standard_deviation == 0.0 and noise_by_obsnme_tag is None:
             pst.pestpp_options["ies_no_noise"] = True
@@ -1278,18 +1415,32 @@ class PestIesSolver(PestSolver):
                 "pest_starting_obs_ensemble.csv"
             )
             pst.pestpp_options.pop("ies_no_noise", False)
-        if ies_parameter_ensemble_method is not None:
+        if ies_parameter_ensemble_method is not None and ies_parameter_ensemble is None:
             self.write_ensemble_parameter_distribution(
                 method=ies_parameter_ensemble_method,
                 par_sigma_range=par_sigma_range,
                 ies_add_base=ies_add_base,
+                ies_save_binary=ies_save_binary,
+                ies_ens_ext=ies_ens_ext,
             )
-            pst.pestpp_options["ies_parameter_ensemble"] = (
-                "pest_starting_par_ensemble.csv"
-            )
+            pst.pestpp_options["ies_parameter_ensemble"] = "pest_starting_par_ensemble.csv"
         if ies_parameter_ensemble is not None:
+            if ies_parameter_ensemble_method is not None:
+                logger.warning(
+                    "ies_parameter_ensemble_method is not None, and neither is ies_parameter_ensemble.\n" +
+                    "Provided ies_parameter_ensemble overrides ies_parameter_ensemble_method."
+                )
+            ies_parameter_ensemble = pyemu.ParameterEnsemble(
+                pst=pst,
+                df=ies_parameter_ensemble["df"],
+            )
+            ies_par_ens_name = f"pest_starting_par_ensemble{ies_ens_ext}"
+            if ies_save_binary:
+                ies_parameter_ensemble.to_binary(Path(self.temp_ws / ies_par_ens_name))
+            else:
+                ies_parameter_ensemble.to_csv(Path(self.temp_ws / ies_par_ens_name))
             pst.pestpp_options["ies_parameter_ensemble"] = (
-                ies_parameter_ensemble
+                ies_par_ens_name
             )
 
         # add a user-provided pcov (eg from an initial leastsquares solve)
@@ -1321,7 +1472,9 @@ class PestIesSolver(PestSolver):
                 "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
                 "stress_obs": self.stress_obs,
-            }
+                "save_stress_contributions": self.save_stress_contributions,
+                "stress_contribution_groups": self.stress_contribution_groups,
+        }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
@@ -1977,6 +2130,8 @@ class PestSenSolver(PestSolver):
                 "observation_index": self.observation_index,
                 "stressmodel_parameterisers": self.stressmodel_parameterisers,
                 "stress_obs": self.stress_obs,
+                "save_stress_contributions": self.save_stress_contributions,
+                "stress_contribution_groups": self.stress_contribution_groups,
             }
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
