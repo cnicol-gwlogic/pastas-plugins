@@ -33,6 +33,7 @@ class PestSolver(BaseSolver):
         exe_name: str | Path,
         model_ws: Optional[str | Path] = Path("model"),
         temp_ws: Optional[str | Path] = Path("temp"),
+        master_ws: Optional[str | Path] = Path("master"),
         noptmax: Optional[int] = 0,
         control_data: Optional[dict[str, Any] | None] = None,
         pcov: Optional[DataFrame | None] = None,
@@ -62,6 +63,9 @@ class PestSolver(BaseSolver):
             The model workspace directory for Pastas files. Default is "model".
         temp_ws : str | Path, optional
             The template workspace directory for PEST files. Default is "temp".
+        master_ws : str | Path, optional
+            The master working directory, by default Path("master") unless
+            use_pypestworker is True, then master_ws is equal to temp_ws.
         noptmax : int, optional
             The maximum number of optimization iterations. Default is 0.
         control_data : dict[str, Any] | None, optional
@@ -136,6 +140,14 @@ class PestSolver(BaseSolver):
             self.model_ws.mkdir(parents=True)
         # template workspace (for pest files)
         self.temp_ws = Path(temp_ws).resolve()
+        master_ws = Path(master_ws).resolve()
+        self.master_ws = temp_ws if use_pypestworker else master_ws # not sure why we do this...why would ppw runs differ? Isn't that just unnecessarily confusing?
+        self.reuse_master = use_pypestworker # depending on if i change the logic as above line, this could be removed...
+        # If a user specs the same pest worker template folder as is spec'd for the master_ws, then we do not want to
+        # delete master in pyemu os_utils (pyemu would crap out). So reuse_master is True in these cases.
+        if self.master_ws == self.temp_ws:
+            self.reuse_master = True
+
         self.exe_name = Path(exe_name)  # pest executable
         self.pf = pyemu.utils.PstFrom(
             original_d=self.model_ws,
@@ -987,6 +999,7 @@ class PestGlmSolver(PestSolver):
         exe_name: str | Path = "pestpp-glm",
         model_ws: str | Path = Path("model"),
         temp_ws: str | Path = Path("temp"),
+        master_ws: str | Path = Path("master"),
         noptmax: int = 0,
         control_data: dict[str, Any] | None = None,
         pcov: DataFrame | None = None,
@@ -1006,6 +1019,9 @@ class PestGlmSolver(PestSolver):
             The model workspace directory for Pastas files. Default is "model".
         temp_ws : str | Path, optional
             The template workspace directory for PEST files. Default is "temp".
+        master_ws : str | Path, optional
+            The master working directory, by default Path("master") unless
+            use_pypestworker is True, then master_ws is equal to temp_ws.
         noptmax : int, optional
             The maximum number of optimization iterations. Default is 0.
         control_data : dict[str, Any] | None, optional
@@ -1030,6 +1046,7 @@ class PestGlmSolver(PestSolver):
             exe_name=exe_name,
             model_ws=model_ws,
             temp_ws=temp_ws,
+            master_ws=master_ws,
             noptmax=noptmax,
             control_data=control_data,
             pcov=pcov,
@@ -1073,7 +1090,7 @@ class PestGlmSolver(PestSolver):
                 port=self.port_number,  # the port to use for communication
                 worker_root=self.temp_ws.parent,  # where to deploy the agent directories; relative to where python is running
                 master_dir=self.temp_ws,  # the manager directory
-                reuse_master=self.use_pypestworker,
+                reuse_master=self.reuse_master,
                 ppw_function=self.ppw_function
                 if self.use_pypestworker
                 else None,  # the function to run in the agent
@@ -1172,6 +1189,7 @@ class PestHpSolver(PestSolver):
             exe_name=exe_name,
             model_ws=model_ws,
             temp_ws=temp_ws,
+            master_ws=master_ws,
             pcov=pcov,
             nfev=nfev,
             long_names=False,
@@ -1181,8 +1199,6 @@ class PestHpSolver(PestSolver):
             use_pypestworker=False, # TODO: allow pypestworker with pest_hp. Need pest_hp version of pypestworker for this. TCP messaging differs.
             **kwargs,
         )
-        master_ws = Path(master_ws).resolve()
-        self.master_ws = temp_ws if self.use_pypestworker else master_ws
         self.exe_agent = Path(exe_agent)
         self.computername = get_computername()
         copy_file(self.exe_agent, self.temp_ws)  # copy agent executable
@@ -1225,7 +1241,7 @@ class PestHpSolver(PestSolver):
             port=self.port_number,  # the port to use for communication
             verbose=silent,
             silent_master=silent,
-            reuse_master=self.use_pypestworker,
+            reuse_master=self.reuse_master,
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
@@ -1325,6 +1341,7 @@ class PestIesSolver(PestSolver):
             exe_name=exe_name,
             model_ws=model_ws,
             temp_ws=temp_ws,
+            master_ws=master_ws,
             pcov=pcov,
             nfev=nfev,
             port_number=port_number,
@@ -1332,7 +1349,6 @@ class PestIesSolver(PestSolver):
             **kwargs,
         )
 
-        self.master_ws = temp_ws if self.use_pypestworker else master_ws
         self.noptmax = noptmax
         self.ies_num_reals = ies_num_reals
         self.control_data = control_data
@@ -1461,7 +1477,7 @@ class PestIesSolver(PestSolver):
             port=self.port_number,  # the port to use for communication
             verbose=silent,
             silent_master=silent,
-            reuse_master=self.use_pypestworker,
+            reuse_master=self.reuse_master,
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
@@ -2059,13 +2075,13 @@ class PestSenSolver(PestSolver):
             exe_name=exe_name,
             model_ws=model_ws,
             temp_ws=temp_ws,
+            master_ws=master_ws,
             pcov=pcov,
             nfev=nfev,
             port_number=port_number,
             use_pypestworker=use_pypestworker,
             **kwargs,
         )
-        self.master_ws = temp_ws if self.use_pypestworker else master_ws
         self.noptmax = noptmax
         self.control_data = control_data
         self.num_workers = (
@@ -2109,7 +2125,7 @@ class PestSenSolver(PestSolver):
             worker_root=self.master_ws.parent,  # where to deploy the agent directories; relative to where python is running
             port=self.port_number,  # the port to use for communication
             master_dir=self.master_ws,  # the manager directory
-            reuse_master=self.use_pypestworker,
+            reuse_master=self.reuse_master,
             verbose=silent,
             silent_master=silent,
             ppw_function=self.ppw_function
