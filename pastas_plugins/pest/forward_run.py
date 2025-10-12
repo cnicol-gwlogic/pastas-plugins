@@ -110,6 +110,7 @@ def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
     port: int,
+    timeout: float,
     models: dict,
     parameter_index: dict,
     observation_index: DataFrame,
@@ -130,6 +131,7 @@ def run_pypestworker(
         pst=pst,
         host=host,
         port=port,
+        timeout=timeout,
         verbose=False,
     )
 
@@ -258,7 +260,7 @@ def run_pypestworker(
                 obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                 contribs_all.index = obsnmes.values
                 # store the series
-                contribs_all_list.append(contribs_all)
+                contribs_all_list.append(contribs_all.Observations)
 
         obsvals_all = concat(obsvals_list, axis=0, ignore_index=False)
         sim_smp_vals = concat(headsmp_list, axis=0, ignore_index=False)

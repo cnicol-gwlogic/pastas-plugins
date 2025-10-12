@@ -39,6 +39,7 @@ class PestSolver(BaseSolver):
         nfev: Optional[int | None] = None,
         long_names: Optional[bool] = True,
         port_number: Optional[int] = 4004,
+        timeout: Optional[int] = 0.1,
         use_pypestworker: Optional[bool] = True,
         par_transform: Optional[Literal["none", "log"]] = "log",
         par_group_settings: Optional[dict[str, dict[str, Any]] | None] = None,
@@ -73,6 +74,8 @@ class PestSolver(BaseSolver):
             Whether to use long names in the PEST control file. Default is True.
         port_number : int, optional
             The port number for communication. Default is 4004.
+        timeout : float, optional
+            Timeout in seconds for PyPestWorker sockets.
         use_pypestworker : bool, optional
             Whether to use the PyPestWorker for Python processing. Default is True.
         par_transform : Literal["none","log"], optional
@@ -144,6 +147,7 @@ class PestSolver(BaseSolver):
         self.noptmax: int = noptmax
         self.control_data: dict[str, Any] = control_data
         self.port_number = port_number
+        self.timeout = timeout
         self.use_pypestworker: bool = use_pypestworker
         self.run_function: Callable = run
         self.ppw_function: Callable = run_pypestworker
@@ -878,6 +882,17 @@ class PestSolver(BaseSolver):
         self.observations.to_csv(Path(self.model_ws / "observations.csv"), date_format="%d/%m/%Y")
         copy_file(Path(self.model_ws / "observations.csv"), self.temp_ws)
 
+        self.ppw_kwargs = {
+            "timeout": self.timeout,  # PyPestWorker socket timeout in seconds
+            "models": self.models,  # "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
+            "parameter_index": self.parameter_index,
+            "observation_index": self.observation_index,
+            "stressmodel_parameterisers": self.stressmodel_parameterisers,
+            "stress_obs": self.stress_obs,
+            "save_stress_contributions": self.save_stress_contributions,
+            "stress_contribution_groups": self.stress_contribution_groups,
+        }
+
     def run(self, arg_str: str = "", silent: bool = False):
         pyemu.os_utils.run(
             f"{self.exe_name.name} pest.pst{arg_str}", cwd=self.pf.new_d, verbose=silent
@@ -1062,15 +1077,7 @@ class PestGlmSolver(PestSolver):
                 ppw_function=self.ppw_function
                 if self.use_pypestworker
                 else None,  # the function to run in the agent
-                ppw_kwargs={
-                    "models": self.models,  # "ml": self.ml,  # "ml_dict": self.ml.to_dict(),
-                    "parameter_index": self.parameter_index,
-                    "observation_index": self.observation_index,
-                    "stressmodel_parameterisers": self.stressmodel_parameterisers,
-                    "stress_obs": self.stress_obs,
-                    "save_stress_contributions": self.save_stress_contributions,
-                    "stress_contribution_groups": self.stress_contribution_groups,
-                }
+                ppw_kwargs=self.ppw_kwargs
                 if self.use_pypestworker
                 else {},  # the arguments to pass to the ppw_function
             )
@@ -1222,15 +1229,7 @@ class PestHpSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={
-                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
-                "parameter_index": self.parameter_index,
-                "observation_index": self.observation_index,
-                "stressmodel_parameterisers": self.stressmodel_parameterisers,
-                "stress_obs": self.stress_obs,
-                "save_stress_contributions": self.save_stress_contributions,
-                "stress_contribution_groups": self.stress_contribution_groups,
-            }
+            ppw_kwargs=self.ppw_kwargs
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
             cleanup=False,
@@ -1373,7 +1372,7 @@ class PestIesSolver(PestSolver):
         ies_parameter_ensemble_method : Literal["norm", "truncnorm", "uniform"] | None, optional
             The method to distribution of the prior for the parameter ensemble, by default None.
             If None the parameter distribution is drawn by pestpp-ies itself.
-        ies_parameter_ensemble : dict[DataFrame,bool] | None, optional
+        ies_parameter_ensemble : DataFrame | None, optional
             Optional DataFrame of prior parameter ensemble.
             This par ens is passed to pestpp-ies via control file keyword ies_parameter_ensemble.
             Useful for batch running a pre-developed / optimised stack. Default is None.
@@ -1394,7 +1393,7 @@ class PestIesSolver(PestSolver):
         pst.pestpp_options["ies_num_reals"] = self.ies_num_reals
         pst.pestpp_options["ies_add_base"] = ies_add_base
         ies_save_binary = eval(str(pestpp_options.get("ies_save_binary", False)).title())
-        ies_ens_ext = ".jcb" if ies_add_base else ".csv"
+        ies_ens_ext = ".jcb" if ies_save_binary else ".csv"
         pst.pestpp_options["par_sigma_range"] = par_sigma_range
         if observation_noise_standard_deviation == 0.0 and noise_by_obsnme_tag is None:
             pst.pestpp_options["ies_no_noise"] = True
@@ -1432,7 +1431,7 @@ class PestIesSolver(PestSolver):
                 )
             ies_parameter_ensemble = pyemu.ParameterEnsemble(
                 pst=pst,
-                df=ies_parameter_ensemble["df"],
+                df=ies_parameter_ensemble,
             )
             ies_par_ens_name = f"pest_starting_par_ensemble{ies_ens_ext}"
             if ies_save_binary:
@@ -1466,15 +1465,7 @@ class PestIesSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={
-                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
-                "parameter_index": self.parameter_index,
-                "observation_index": self.observation_index,
-                "stressmodel_parameterisers": self.stressmodel_parameterisers,
-                "stress_obs": self.stress_obs,
-                "save_stress_contributions": self.save_stress_contributions,
-                "stress_contribution_groups": self.stress_contribution_groups,
-        }
+            ppw_kwargs=self.ppw_kwargs
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
@@ -2124,15 +2115,7 @@ class PestSenSolver(PestSolver):
             ppw_function=self.ppw_function
             if self.use_pypestworker
             else None,  # the function to run in the agent
-            ppw_kwargs={
-                "models": self.models, #"ml": self.ml,  # "ml_dict": self.ml.to_dict(),
-                "parameter_index": self.parameter_index,
-                "observation_index": self.observation_index,
-                "stressmodel_parameterisers": self.stressmodel_parameterisers,
-                "stress_obs": self.stress_obs,
-                "save_stress_contributions": self.save_stress_contributions,
-                "stress_contribution_groups": self.stress_contribution_groups,
-            }
+            ppw_kwargs=self.ppw_kwargs
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
         )
