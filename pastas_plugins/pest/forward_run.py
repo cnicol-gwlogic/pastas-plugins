@@ -42,17 +42,18 @@ def run() -> None:
         dill_load(gz_open(sm_p)) for sm_p in pickles
     ]  # pickle.load(
     for sm_p in stressmodel_parameterisers:
-        # get df of updated (parameterised and interpolated) stress TimeSeries for model
-        updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
         # update stress TimeSeries
         for ml in models:
             smodel = ml.stressmodels.get(sm_p.stressmodel_name)
             if smodel is not None:
+                # get df of updated (parameterised and interpolated) stress TimeSeries for model
+                updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
                 for stress_series in smodel.stress:
                     if stress_series.name in sm_p.stress_names:
                         stress_series.series_original = updated_stress_df.loc[
                             :, stress_series.name
                         ]
+                ml.stressmodels[sm_p.stressmodel_name] = smodel
     # ^^ one sm_p even for many pastas models in one pest cal will work ok - we just update the stress rates,
     # while pumping well distances from each model (obs bore) remain as originally defined per model.
     # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
@@ -60,10 +61,10 @@ def run() -> None:
     # simulate
     for ml in models:
         ml_name = ml.name
-        ml.settings["tmax"] = None
+        #ml.settings["tmax"] = None
         simulation = ml.simulate(
-            tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-            tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+            #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+            #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
         )
         simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y")
 
@@ -85,8 +86,8 @@ def run() -> None:
         if save_stress_contributions:
             contribs_all = ml.get_contributions(
                 split=True,
-                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
             ) # all contributions
             contribs_all = [s.resample("ME").mean() for s in contribs_all] # downsample from daily. Should make this an option...
             contribs_all = concat(contribs_all, axis=1, ignore_index=False)
@@ -140,15 +141,6 @@ def run_pypestworker(
         return None
 
     while True:
-        # update custom stressmodel parameters
-        for sm_p in stressmodel_parameterisers:
-            sm_p_parnames = sm_p.stress_pars.parnme
-            new_par_values = pvals.loc[sm_p_parnames].values
-            # get df of updated (parameterised and interpolated) stress TimeSeries for model
-            interp_kwargs = sm_p.interp_kwargs
-            interp_kwargs["updated_sourcevals"] = new_par_values
-            updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
-
         obsvals_list, obs_diffs_list, stress_obs_list, headsmp_list, contribs_all_list = [], [], [], [], []
         head_obsgps = [
             og for og in observation_index.index.get_level_values("obgnme").unique() \
@@ -163,7 +155,7 @@ def run_pypestworker(
             if og.find("headdiff") >= 0
         ]
         for ml_name, ml in models.items():
-            ml.settings["tmax"] = None
+            #ml.settings["tmax"] = None
             ml_code = ml.oseries.metadata["ml_code"]
             # update standard pastas model parameters
             for pname, val in pvals.items():
@@ -175,15 +167,22 @@ def run_pypestworker(
             for sm_p in stressmodel_parameterisers:
                 smodel = ml.stressmodels.get(sm_p.stressmodel_name)
                 if smodel is not None:
+                    sm_p_parnames = sm_p.stress_pars.parnme
+                    new_par_values = pvals.loc[sm_p_parnames].values
+                    # get df of updated (parameterised and interpolated) stress TimeSeries for model
+                    interp_kwargs = sm_p.interp_kwargs
+                    interp_kwargs["updated_sourcevals"] = new_par_values
+                    updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
                     for stress_series in smodel.stress:
                         if stress_series.name in sm_p.stress_names:
                             stress_series.series_original = updated_stress_df.loc[
                                 :, stress_series.name
                             ]
+                    ml.stressmodels[sm_p.stressmodel_name] = smodel
             # run simulation
             sim = ml.simulate(
-                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
             )
 
             # get head obs
@@ -236,8 +235,8 @@ def run_pypestworker(
                     ]
                 contribs_all = ml.get_contributions(
                     split=True,
-                    tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                    tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                    #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                    #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
                 )  # all contributions
                 contribs_all = [s.resample("ME").mean() for s in
                                 contribs_all]  # downsample from daily. Should make this an option...

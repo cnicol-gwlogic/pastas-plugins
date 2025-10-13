@@ -315,8 +315,8 @@ class PestSolver(BaseSolver):
             # get all stress contributions for each model at a minimum.
             contribs_all = ml.get_contributions(
                 split=True,
-                tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
             )  # all contributions
             contribs_all = [s.resample("ME").mean() for s in
                             contribs_all]  # downsample from daily. Should make this an option...
@@ -379,8 +379,8 @@ class PestSolver(BaseSolver):
             # just monthly mean to avoid crazy big files; TODO: could make headsmp resampling an option for short sims.
             headsmp_obs = PestSolver._setup_base_obs(
                 ml.simulate(
-                    tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                    tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
+                    #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
+                    #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
                 ).resample("ME").mean(),
                 obs_type="headsmp",
                 weight=0.0,
@@ -1485,6 +1485,7 @@ class PestIesSolver(PestSolver):
             ppw_kwargs=self.ppw_kwargs
             if self.use_pypestworker
             else {},  # the arguments to pass to the ppw_function
+            cleanup=True,
         )
 
         phidf = pd.read_csv(self.master_ws / "pest.phi.meas.csv", index_col=0)
