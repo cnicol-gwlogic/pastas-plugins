@@ -98,7 +98,7 @@ class PestSolver(BaseSolver):
             Option to calibrate to head differences from previous head. Default is False.
         save_stress_contributions : bool, optional
             Whether to save stressmodel contributions to pest obs_data file (zero-weighted).
-        Series, optional
+        stress_contribution_groups: Series, optional
             Series multi-indexed by: [Pastas model name, stressmodel name, label string]. Values ("istress_names")
             contain stress names for which stress contributions are summed for each model/stressmodel/label key.
             Default is None.
@@ -169,7 +169,9 @@ class PestSolver(BaseSolver):
         self.stressmodel_parameterisers: list | None = stressmodel_parameterisers
         self.obs_diff: bool = obs_diff
         self.save_stress_contributions = save_stress_contributions
-        self.stress_contribution_groups = stress_contribution_groups
+        self.stress_contribution_groups = None
+        if self.save_stress_contributions:
+            self.stress_contribution_groups = stress_contribution_groups
         self.phi_factors: dict = phi_factors
         # TODO MAYBE self.covary_multimodels_constant_d: bool = covary_multimodels_constant_d
 
@@ -180,7 +182,7 @@ class PestSolver(BaseSolver):
         self.stress_obs = None
 
     @property
-    def stress_contribution_groups(self) -> DataFrame:
+    def stress_contribution_groups(self) -> DataFrame | None:
         return self._stress_contribution_groups
 
     @stress_contribution_groups.setter
@@ -197,10 +199,7 @@ class PestSolver(BaseSolver):
             self._stress_contribution_groups.index.names = ['ml_name', 'sm_name','label']
             self._stress_contribution_groups.name = "istress_names"
         else:
-            self._stress_contribution_groups = pd.Series(
-                index=pd.MultiIndex.from_tuples([], names=['ml_name', 'sm_name','label']),
-                name="istress_names",
-            )
+            self._stress_contribution_groups = None
 
     def add_model(
             self,
@@ -434,6 +433,7 @@ class PestSolver(BaseSolver):
         # ensure we remove stress_contribution_groups.csv so forward_run can use its existence
         # to define bool save_stress_contributions (non pypestworker runs)
         Path(self.model_ws / "stress_contribution_groups.csv").unlink(missing_ok=True)
+        self.sm_contribs = pd.DataFrame()
         if self.save_stress_contributions:
             self.sm_contribs = self._get_stressmodel_contributions()
         self.stress_obs = pd.concat([self.stress_obs, self.sm_contribs], ignore_index=False)
@@ -689,21 +689,22 @@ class PestSolver(BaseSolver):
             )
 
             # stress contributions
-            for sm_name, istress_groups in self.stress_contribution_groups.xs(ml_name, level=0).groupby(level=0):
-                obsgp = f"stress_contrib_{ml_name}"
-                self.pf.add_observations(
-                    f"simulation_stress_contributions_{ml_name}.csv",
-                    index_cols=["column_names","date"],
-                    use_cols=["Observations"],
-                    obsgp=obsgp,
-                )
-                # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
-                self._update_stress_obs_names(
-                    ml_name=ml_name,
-                    obs_types=["stress_contribution"],
-                    date_format="%d/%m/%Y",
-                    rsplit_column_name=False,
-                )
+            if self.save_stress_contributions:
+                for sm_name, istress_groups in self.stress_contribution_groups.xs(ml_name, level=0).groupby(level=0):
+                    obsgp = f"stress_contrib_{ml_name}"
+                    self.pf.add_observations(
+                        f"simulation_stress_contributions_{ml_name}.csv",
+                        index_cols=["column_names","date"],
+                        use_cols=["Observations"],
+                        obsgp=obsgp,
+                    )
+                    # add pest obsnme and obgnme to self.observations for this last set of obs added to pst
+                    self._update_stress_obs_names(
+                        ml_name=ml_name,
+                        obs_types=["stress_contribution"],
+                        date_format="%d/%m/%Y",
+                        rsplit_column_name=False,
+                    )
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
