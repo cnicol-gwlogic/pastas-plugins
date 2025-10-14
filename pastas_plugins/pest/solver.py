@@ -31,9 +31,9 @@ class PestSolver(BaseSolver):
     def __init__(
         self,
         exe_name: str | Path,
-        model_ws: Optional[str | Path] = Path("model"),
-        temp_ws: Optional[str | Path] = Path("temp"),
-        master_ws: Optional[str | Path] = Path("master"),
+        model_ws: Optional[str | Path] = Path("pastas_files"),
+        temp_ws: Optional[str | Path] = Path("pest"),
+        master_ws: Optional[str | Path] = Path("pest"),
         noptmax: Optional[int] = 0,
         control_data: Optional[dict[str, Any] | None] = None,
         pcov: Optional[DataFrame | None] = None,
@@ -48,7 +48,7 @@ class PestSolver(BaseSolver):
         stressmodel_parameterisers: Optional[list | None] = None,
         obs_diff: Optional[bool] = False,
         save_stress_contributions: Optional[bool] = False,
-        stress_contribution_groups: Optional[Series | None] = None,
+        stress_contribution_groups: Optional[DataFrame | None] = None,
         phi_factors: Optional[dict] = {},
         covary_multimodels_constant_d: bool = True,
         **kwargs,
@@ -98,10 +98,13 @@ class PestSolver(BaseSolver):
             Option to calibrate to head differences from previous head. Default is False.
         save_stress_contributions : bool, optional
             Whether to save stressmodel contributions to pest obs_data file (zero-weighted).
-        stress_contribution_groups: Series, optional
-            Series multi-indexed by: [Pastas model name, stressmodel name, label string]. Values ("istress_names")
-            contain stress names for which stress contributions are summed for each model/stressmodel/label key.
-            Default is None.
+        stress_contribution_groups: DataFrame, optional
+            Series multi-indexed by: [Pastas model name, stressmodel name, label string].
+            Columns ("istress_names", "save_all") contain stress names for which stress contributions are summed
+            for each model/stressmodel/label key.
+            Column "save_all" is a flag for each model - for each model (index 0 model name set),
+            if any of these are True, then all stress contributions are saved for this model
+             (which can be big), not just the identified istress_names/groups. Default is None.
         phi_factors : dict, optional
             Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
             via weighting the prior. Default is an empty dict (no phi factors applied in pest). NOTE: This is
@@ -197,7 +200,10 @@ class PestSolver(BaseSolver):
             ) # we need spaces removed because pyemu will do this too,
             #   and we need to be able to link between pyemu names and these user-provided labels
             self._stress_contribution_groups.index.names = ['ml_name', 'sm_name','label']
-            self._stress_contribution_groups.name = "istress_names"
+            if not set(["istress_names","save_all"]).issubset(set(self._stress_contribution_groups.columns)):
+                raise Exception(f"stress_contribution_groups must contain columns: ['istress_names','save_all']\n" +
+                                "but it contains only {stress_contribution_groups.columns}")
+            self._stress_contribution_groups.save_all = self._stress_contribution_groups.save_all.astype(bool)
         else:
             self._stress_contribution_groups = None
 
@@ -326,9 +332,14 @@ class PestSolver(BaseSolver):
             for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
                 istress_groups = ml_stress_groups.xs(sm_name)
                 for label, istress_names in istress_groups.groupby(level=0):
-                    names = istress_groups.xs(label).values.flatten()
+                    names = istress_groups.xs(label)[["istress_names"]].values.flatten()
                     # aggregate selected groups of istress contributions
                     contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            # drop unspecific istress_names / labels from the df
+            if (self.stress_contribution_groups.xs(ml_name).save_all == False).any():
+                contribs_all = contribs_all.loc[:,
+                contribs_all.columns.isin(self.stress_contribution_groups.xs(ml_name).index.levels[1])
+                ]
             # melt from xtab to flat array and save
             contribs_all.index.name = "date"
             contribs_all = contribs_all.reset_index(drop=False).melt(
@@ -998,9 +1009,9 @@ class PestGlmSolver(PestSolver):
     def __init__(
         self,
         exe_name: str | Path = "pestpp-glm",
-        model_ws: str | Path = Path("model"),
-        temp_ws: str | Path = Path("temp"),
-        master_ws: str | Path = Path("master"),
+        model_ws: str | Path = Path("pastas_files"),
+        temp_ws: str | Path = Path("pest"),
+        master_ws: str | Path = Path("pest"),
         noptmax: int = 0,
         control_data: dict[str, Any] | None = None,
         pcov: DataFrame | None = None,
@@ -1137,9 +1148,9 @@ class PestHpSolver(PestSolver):
         self,
         exe_name: str | Path = "pest_hp",
         exe_agent: str | Path = "agent_hp",
-        model_ws: str | Path = Path("model"),
-        temp_ws: str | Path = Path("temp"),
-        master_ws: str | Path = Path("master"),
+        model_ws: str | Path = Path("pastas_files"),
+        temp_ws: str | Path = Path("pest"),
+        master_ws: str | Path = Path("pest"),
         noptmax: int = 0,
         control_data: dict[str, Any] | None = None,
         pcov: DataFrame | None = None,
@@ -1286,9 +1297,9 @@ class PestIesSolver(PestSolver):
     def __init__(
         self,
         exe_name: str | Path = "pestpp-ies",
-        model_ws: str | Path = Path("model"),
-        temp_ws: str | Path = Path("temp"),
-        master_ws: str | Path = Path("master"),
+        model_ws: str | Path = Path("pastas_files"),
+        temp_ws: str | Path = Path("pest"),
+        master_ws: str | Path = Path("pest"),
         noptmax: int = 0,
         ies_num_reals: int = 50,
         control_data: dict[str, Any] | None = None,
@@ -2024,9 +2035,9 @@ class PestSenSolver(PestSolver):
     def __init__(
         self,
         exe_name: str | Path = "pestpp-sen",
-        model_ws: str | Path = Path("model"),
-        temp_ws: str | Path = Path("temp"),
-        master_ws: str | Path = Path("master"),
+        model_ws: str | Path = Path("pastas_files"),
+        temp_ws: str | Path = Path("pest"),
+        master_ws: str | Path = Path("pest"),
         noptmax: int = 0,
         control_data: dict[str, Any] | None = None,
         pcov: DataFrame | None = None,

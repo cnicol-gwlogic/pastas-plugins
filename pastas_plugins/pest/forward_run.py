@@ -95,9 +95,14 @@ def run() -> None:
             for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
                 istress_groups = ml_stress_groups.xs(sm_name)
                 for label, istress_names in istress_groups.groupby(level=0):
-                    names = istress_groups.xs(label).values.flatten()
+                    names = istress_groups.xs(label)[["istress_names"]].values.flatten()
                     # aggregate selected groups of istress contributions
                     contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            # drop unspecific istress_names / labels from the df
+            if (stress_contribution_groups.xs(ml_name).save_all == False).any():
+                contribs_all = contribs_all.loc[:,
+                contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.levels[1])
+                ]
             contribs_all.index.name = "date"
             contribs_all = contribs_all.reset_index(drop=False).melt(
                 id_vars="date",
@@ -245,9 +250,14 @@ def run_pypestworker(
                 for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
                     istress_groups = ml_stress_groups.xs(sm_name)
                     for label, istress_names in istress_groups.groupby(level=0):
-                        names = istress_groups.xs(label).values.flatten()
+                        names = istress_groups.xs(label)[["istress_names"]].values.flatten()
                         # aggregate selected groups of istress contributions
                         contribs_all.loc[:, label] = contribs_all.loc[:, names].sum(axis=1)
+                # drop unspecific istress_names / labels from the df
+                if (stress_contribution_groups.xs(ml_name).save_all == False).any():
+                    contribs_all = contribs_all.loc[:,
+                    contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.levels[1])
+                    ]
                 # melt from xtab to flat array and save
                 contribs_all.index.name = "date"
                 contribs_all = contribs_all.reset_index(drop=False).melt(

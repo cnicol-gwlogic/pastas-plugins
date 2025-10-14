@@ -276,6 +276,9 @@ class BaseParameteriser(ABC):
                 pd.concat(stress_parcovs).fillna(0.0)
             )
 
+            for var in [stress_parcovs, covs, names_list, sill, logmask]:
+                var = None
+
         return
 
     def _calc_factors_2d(
@@ -408,6 +411,9 @@ class BaseParameteriser(ABC):
         self.stress_pars["column_names"] = parnme_indexer.column_names
         self.stress_pars["index_org"] = parnme_indexer.indices
 
+        for var in [usecols, indices, parnme_indexer]:
+            var = None
+
     def interpolate_stresses(
         self,
         targval_min: Optional[float] = 0.0,
@@ -529,6 +535,9 @@ class BaseParameteriser(ABC):
                     :, stress_series.name
                 ]
 
+        for var in [sourcevals, source_stresses, krig_cols]:
+            var = None
+
         return updated_source_stresses  # self.stress #self.stressmodel.stress
 
     def add_stress_obs(
@@ -565,6 +574,9 @@ class BaseParameteriser(ABC):
             lambda x: x.interpolate(method='linear')
         )
         modobs = modobs.loc[self.obs_data.index].Observations
+
+        for var in [new_idx]:
+            var = None
 
         return modobs
 
@@ -757,6 +769,8 @@ class WellModelParameteriser(BaseParameteriser):
                 self.t_variogram_range, self.max_vario_range
             )
 
+            stress_pars = None
+
         elif (
             self.par_freq is None
         ):  # - a single parameter per stress TimeSeries, which is applied constant in time
@@ -810,6 +824,9 @@ class WellModelParameteriser(BaseParameteriser):
             # ult_lbound = self.ml.parameters.loc[self.vary, ["pmin"]].transpose().values.tolist(),
             # ult_ubound = self.ml.parameters.loc[self.vary, ["pmax"]].transpose().values.tolist(),
         )
+
+        for var in [pargp, pargp_indices]:
+            var = None
 
         return source_points
 
