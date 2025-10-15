@@ -101,7 +101,7 @@ def run() -> None:
             # drop unspecific istress_names / labels from the df
             if (stress_contribution_groups.xs(ml_name).save_all == False).any():
                 contribs_all = contribs_all.loc[:,
-                contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.levels[1])
+                contribs_all.columns.isin(ml_stress_groups.index.get_level_values("label"))
                 ]
             contribs_all.index.name = "date"
             contribs_all = contribs_all.reset_index(drop=False).melt(
@@ -256,7 +256,7 @@ def run_pypestworker(
                 # drop unspecific istress_names / labels from the df
                 if (stress_contribution_groups.xs(ml_name).save_all == False).any():
                     contribs_all = contribs_all.loc[:,
-                    contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.levels[1])
+                    contribs_all.columns.isin(ml_stress_groups.index.get_level_values("label"))
                     ]
                 # melt from xtab to flat array and save
                 contribs_all.index.name = "date"
