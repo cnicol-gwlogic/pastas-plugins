@@ -486,7 +486,7 @@ class PestSolver(BaseSolver):
                 self.vary_by_model[ml_name], "pmax"
             ].values
             ml_code = ml.oseries.metadata["ml_code"]
-            parameters.index = [f"m{ml_code}{p}" for p in parameters.index]
+            parameters.index = [f"{ml_code}{p}" for p in parameters.index]
             pars_list.append(parameters.copy())
         parameters = pd.concat(pars_list, ignore_index=False)
         parameters.index.name = "parnames"
