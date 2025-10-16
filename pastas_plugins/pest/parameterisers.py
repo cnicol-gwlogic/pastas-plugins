@@ -565,6 +565,7 @@ class BaseParameteriser(ABC):
         Interpolate modelled stress rates to observed datetimes.
         """
         # insert obs indices --> interp(linear) -->keep only obs dts
+        self.stress.index.name = "Datetime"  # somewhere this has reverted to None...no idea why/where.
         modobs = self.stress.melt(
             var_name="column_names", ignore_index=False,
             value_name="Observations"
