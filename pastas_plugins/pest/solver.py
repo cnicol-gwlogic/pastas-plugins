@@ -1392,6 +1392,7 @@ class PestIesSolver(PestSolver):
         ies_parameter_ensemble: Optional[DataFrame | None] = None,
         noise_by_obsnme_tag: Optional[DataFrame | None] = None,
         pestpp_options: dict[str, Any] | None = None,
+        custom_obs_weights: Optional[DataFrame | None] = None,
         silent: bool = False,
     ) -> None:
         """
@@ -1422,6 +1423,11 @@ class PestIesSolver(PestSolver):
             with two columns: 'value' and 'noise_type' ['absolute' or 'relative']. Default is None.
         pestpp_options : dict | None, optional
             Additional PEST++ options, by default None.
+        custom_obs_weights : DataFrame | None, optional
+            Custom observation weights indexed by model name, with columns of date_from, date_to, obs_type, and weight.
+            obs_type can be "head", "stress", or "headdiff"; these along with model name are used to filter obs group
+            name (obgnme) for selective weight assignment between the specified dates.
+            Default is None.
         Returns
         -------
         None
@@ -1435,6 +1441,22 @@ class PestIesSolver(PestSolver):
         ies_save_binary = eval(str(pestpp_options.get("ies_save_binary", False)).title())
         ies_ens_ext = ".jcb" if ies_save_binary else ".csv"
         pst.pestpp_options["par_sigma_range"] = par_sigma_range
+
+        if custom_obs_weights is not None:
+            custom_obs_weights = custom_obs_weights.dropna(subset=["date_from", "date_to", "obs_type", "weight"])
+            pst.observation_data = pst.observation_data.join(
+                self.observations[["obsnme","obs_type"]].set_index("obsnme"),
+            how="left")
+            pst.observation_data = pst.observation_data.join(
+                self.stress_obs[["obsnme","obs_type"]].set_index("obsnme"),
+            how="left")
+            pst.observation_data.loc[:, "date"] = pd.to_datetime(pst.observation_data.date, date_format="%d/%m/%Y")
+            for ml_name, row in custom_obs_weights.iterrows():
+                mask = (pst.observation_data.obgnme.str.contains(f"{ml_name.lower()}", regex=True)) & \
+                        (pst.observation_data.obgnme.str.contains(f"{row.obs_type}_", regex=True)) & \
+                       (pst.observation_data.date.between(row.date_from, row.date_to))
+                pst.observation_data.loc[mask, "weight"] = row.weight
+
         if observation_noise_standard_deviation == 0.0 and noise_by_obsnme_tag is None:
             pst.pestpp_options["ies_no_noise"] = True
         elif noise_by_obsnme_tag is not None:
