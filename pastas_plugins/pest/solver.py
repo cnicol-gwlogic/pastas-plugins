@@ -299,6 +299,7 @@ class PestSolver(BaseSolver):
     ) -> DataFrame:
         """convert Pastas sim-type Series to DataFrame, and add obs_type and weight fields"""
         data.name = series_name
+        data.index.name = "Datetime"
         data = data.to_frame()
         data["obs_type"] = obs_type
         data["weight"] = weight
@@ -490,6 +491,10 @@ class PestSolver(BaseSolver):
             pars_list.append(parameters.copy())
         parameters = pd.concat(pars_list, ignore_index=False)
         parameters.index.name = "parnames"
+        if parameters.index.str.rsplit("_").str[0].str.isupper().any():
+            logger.error(
+                "pestpp is case insensitive so any capitalized parameters (stress model names) can cause issues in the solver."
+            )
         par_sel = parameters.loc[:, ["optimal"]]
         par_sel.to_csv(self.model_ws / "parameters_sel.csv")
         copy_file(self.model_ws / "parameters_sel.csv", self.temp_ws)
@@ -811,7 +816,7 @@ class PestSolver(BaseSolver):
         pst.control_data.noptmax = self.noptmax  # optimization runs
         if self.control_data is not None:
             for key, value in self.control_data.items():
-                if key == "control_data":
+                if key == "noptmax":
                     logger.warning(
                         "noptmax is set as an attribute and can't be set using the `control_data` dictionary"
                     )
@@ -921,6 +926,16 @@ class PestSolver(BaseSolver):
         pyemu.os_utils.run(
             f"{self.exe_name.name} pest.pst{arg_str}", cwd=self.pf.new_d, verbose=silent
         )
+
+    def initialize(self, version: int = 2) -> None:
+        """Initialize the solver by setting up the model and files."""
+        if len(self.models) == 0:
+            raise ValueError("No Pastas model assigned to the solver.")
+        if self.pf.pst is None:
+            self.setup_model()
+            self.setup_files(version=version)
+        else:
+            logger.info("Solver is already initialized.")
 
     @staticmethod
     def add_offsets(pst) -> pyemu.Pst:
@@ -1091,8 +1106,7 @@ class PestGlmSolver(PestSolver):
             The standard errors of the optimal parameters.
         """
 
-        self.setup_model()
-        self.setup_files()
+        self.initialize(version=2)
         if self.use_pypestworker:
             pyemu.os_utils.start_workers(
                 worker_dir=self.temp_ws,  # the folder which contains the "template" PEST dataset
@@ -1241,8 +1255,7 @@ class PestHpSolver(PestSolver):
         stderr : NDArray[np.float64]
             The standard errors of the optimal parameters.
         """
-        self.setup_model()
-        self.setup_files(version=1)
+        self.initialize(version=1)
         pyemu.os_utils.start_workers(
             worker_dir=self.temp_ws,  # the folder which contains the "template" PEST dataset
             exe_rel_path=self.exe_name.name,  # the PEST software version we want to run
@@ -1413,8 +1426,7 @@ class PestIesSolver(PestSolver):
         -------
         None
         """
-        self.setup_model()
-        self.setup_files()
+        self.initialize(version=2)
 
         # change ies_num_reals
         pst = pyemu.Pst(str(self.temp_ws / "pest.pst"))
@@ -2013,6 +2025,11 @@ class PestIesSolver(PestSolver):
             - numpy.ndarray: The optimal parameters.
             - numpy.ndarray: The standard error of the parameters.
         """
+        if "noise" in kwargs:
+            del kwargs["noise"]  # remove noise from kwargs, not used in PestIesSolver
+        if "weights" in kwargs:
+            del kwargs["weights"]
+
         if run_ensembles:
             self.run_ensembles(**kwargs)
 
@@ -2120,8 +2137,7 @@ class PestSenSolver(PestSolver):
         None
         """
 
-        self.setup_model()
-        self.setup_files()
+        self.initialize(version=2)
 
         # change ies_num_reals
         pst = pyemu.Pst(str(self.temp_ws / "pest.pst"))
