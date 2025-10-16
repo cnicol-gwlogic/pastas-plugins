@@ -1444,13 +1444,14 @@ class PestIesSolver(PestSolver):
 
         if custom_obs_weights is not None:
             custom_obs_weights = custom_obs_weights.dropna(subset=["date_from", "date_to", "obs_type", "weight"])
-            pst.observation_data = pst.observation_data.join(
-                self.observations[["obsnme","obs_type"]].set_index("obsnme"),
-            how="left")
-            pst.observation_data = pst.observation_data.join(
-                self.stress_obs[["obsnme","obs_type"]].set_index("obsnme"),
-            how="left")
-            pst.observation_data.loc[:, "date"] = pd.to_datetime(pst.observation_data.date, date_format="%d/%m/%Y")
+            join_data = pd.concat(
+                [
+                    self.observations[["obsnme","obs_type"]].set_index("obsnme"),
+                    self.stress_obs[["obsnme", "obs_type"]].set_index("obsnme"),
+                    ], axis=0, ignore_index=False,
+            )
+            pst.observation_data = pst.observation_data.join(join_data, how="left")
+            pst.observation_data.loc[:, "date"] = pd.to_datetime(pst.observation_data.date, format="%d/%m/%Y")
             for ml_name, row in custom_obs_weights.iterrows():
                 mask = (pst.observation_data.obgnme.str.contains(f"{ml_name.lower()}", regex=True)) & \
                         (pst.observation_data.obgnme.str.contains(f"{row.obs_type}_", regex=True)) & \
