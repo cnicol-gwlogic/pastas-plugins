@@ -534,6 +534,7 @@ class BaseParameteriser(ABC):
                 stress_series.series_original = source_stresses.loc[
                     :, stress_series.name
                 ]
+        self.stress = self.stressmodel.get_stress(squeeze=False).loc[:, self.stress_names]
 
         for var in [sourcevals, source_stresses, krig_cols]:
             var = None
