@@ -502,8 +502,9 @@ class PestSolver(BaseSolver):
         self.parameters = parameters
 
         # model
-        for p in Path(self.model_ws).glob("*.pas"):
-            p.unlink()
+        for dir in (self.model_ws, self.temp_ws, self.master_ws):
+            for p in Path(dir).glob("*.pas"):
+                p.unlink()
         for ml_name, ml in self.models.items():
             ml_code = ml.oseries.metadata["ml_code"]
             ml_file = self.model_ws / f"model_{ml_code}.pas"

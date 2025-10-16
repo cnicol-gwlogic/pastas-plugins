@@ -529,9 +529,9 @@ class BaseParameteriser(ABC):
         updated_source_stresses = source_stresses
 
         # replace stressmodel.stress
-        for stress_series in self.stressmodel.stress:
+        for idx, stress_series in enumerate(self.stressmodel.stress):
             if stress_series in self.stress_names:
-                stress_series.series_original = source_stresses.loc[
+                self.stressmodel.stress[idx].series_original = source_stresses.loc[
                     :, stress_series.name
                 ]
         self.stress = self.stressmodel.get_stress(squeeze=False).loc[:, self.stress_names]
