@@ -299,7 +299,7 @@ class PestSolver(BaseSolver):
     ) -> DataFrame:
         """convert Pastas sim-type Series to DataFrame, and add obs_type and weight fields"""
         data.name = series_name
-        data.index.name = "Datetime"
+        data.index.name = "date"
         data = data.to_frame()
         data["obs_type"] = obs_type
         data["weight"] = weight
