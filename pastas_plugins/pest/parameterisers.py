@@ -525,8 +525,7 @@ class BaseParameteriser(ABC):
                 source_stresses.loc[:, krig_col] = (
                     source_stresses.loc[:, krig_col].ffill().bfill()
                 )
-
-        updated_source_stresses = source_stresses
+            targval = None
 
         # replace stressmodel.stress
         for idx, stress_series in enumerate(self.stressmodel.stress):
@@ -539,7 +538,7 @@ class BaseParameteriser(ABC):
         for var in [sourcevals, source_stresses, krig_cols]:
             var = None
 
-        return updated_source_stresses  # self.stress #self.stressmodel.stress
+        return self.stress  # self.stress #self.stressmodel.stress
 
     def add_stress_obs(
             self,
