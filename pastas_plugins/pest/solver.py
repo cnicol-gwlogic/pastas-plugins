@@ -1426,7 +1426,7 @@ class PestIesSolver(PestSolver):
             Additional PEST++ options, by default None.
         custom_obs_weights : DataFrame | None, optional
             Custom observation weights indexed by model name, with columns of date_from, date_to, obs_type, and weight.
-            obs_type can be "head", "stress", or "headdiff"; these along with model name are used to filter obs group
+            obs_type can be "head", "stress_obs", or "headdiff"; these along with model name are used to filter obs group
             name (obgnme) for selective weight assignment between the specified dates.
             Default is None.
         Returns
