@@ -54,6 +54,8 @@ def run() -> None:
                             :, stress_series.name
                         ]
                 ml.stressmodels[sm_p.stressmodel_name] = smodel
+                sm_p.stressmodel = smodel
+                sm_p.stress = sm_p.stressmodel.get_stress(squeeze=False).loc[:, sm_p.stress_names]
     # ^^ one sm_p even for many pastas models in one pest cal will work ok - we just update the stress rates,
     # while pumping well distances from each model (obs bore) remain as originally defined per model.
     # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
@@ -184,6 +186,8 @@ def run_pypestworker(
                                 :, stress_series.name
                             ]
                     ml.stressmodels[sm_p.stressmodel_name] = smodel
+                    sm_p.stressmodel = smodel
+                    sm_p.stress = sm_p.stressmodel.get_stress(squeeze=False).loc[:, sm_p.stress_names]
             # run simulation
             sim = ml.simulate(
                 #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
