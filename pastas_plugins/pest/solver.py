@@ -638,8 +638,9 @@ class PestSolver(BaseSolver):
                 sm_p.add_stress_parameters(par_name_base="sm")
                 # pickle to disk for pest non-pypestworker workers
                 fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl.gz"
-                with gzip.open(fname, "wb") as f:
-                    dill.dump(sm_p, f)  # pickle
+                if not self.use_pypestworker:
+                    with gzip.open(fname, "wb") as f:
+                        dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
                 parnmes = sm_p.source_points.parnme.values
                 self.parameter_index.update(
