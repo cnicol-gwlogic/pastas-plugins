@@ -529,7 +529,7 @@ class BaseParameteriser(ABC):
 
         # replace stressmodel.stress
         for idx, stress_series in enumerate(self.stressmodel.stress):
-            if stress_series in self.stress_names:
+            if stress_series.name in self.stress_names:
                 self.stressmodel.stress[idx].series_original = source_stresses.loc[
                     :, stress_series.name
                 ]

@@ -148,6 +148,7 @@ def run_pypestworker(
         return None
 
     while True:
+
         obsvals_list, obs_diffs_list, stress_obs_list, headsmp_list, contribs_all_list = [], [], [], [], []
         head_obsgps = [
             og for og in observation_index.index.get_level_values("obgnme").unique() \
@@ -188,6 +189,7 @@ def run_pypestworker(
                     ml.stressmodels[sm_p.stressmodel_name] = smodel
                     sm_p.stressmodel = smodel
                     sm_p.stress = sm_p.stressmodel.get_stress(squeeze=False).loc[:, sm_p.stress_names]
+
             # run simulation
             sim = ml.simulate(
                 #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
