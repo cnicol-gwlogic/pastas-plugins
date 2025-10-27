@@ -11,10 +11,7 @@ def run() -> None:
     from pandas import read_csv, concat
     from pastas.io.base import load as load_model
 
-    from pastas_plugins.pest.parameterisers import (  # noqa: F401
-        BaseParameteriser,
-        WellModelParameteriser,
-    )
+    from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
 
     # base path
     fpath = Path(__file__).parent
@@ -36,6 +33,7 @@ def run() -> None:
             pname = pname.replace("_g", "_A") if pname.endswith("_g") else pname
             if pname[len(ml_code):] in ml.parameters.index.values and ml_code == pname[:len(ml_code)]:
                 ml.set_parameter(pname[len(ml_code):], optimal=val)
+
     # update custom stressmodel parameters
     pickles = Path(fpath).glob("*.parameteriser.pkl.gz")
     stressmodel_parameterisers = [
@@ -44,23 +42,27 @@ def run() -> None:
     for sm_p in stressmodel_parameterisers:
         # update stress TimeSeries
         for ml in models:
-            smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-            if smodel is not None:
-                # get df of updated (parameterised and interpolated) stress TimeSeries for model
-                updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
-                for stress_series in smodel.stress:
-                    if stress_series.name in sm_p.stress_names:
-                        stress_series.series_original = updated_stress_df.loc[
-                            :, stress_series.name
-                        ]
-                ml.stressmodels[sm_p.stressmodel_name] = smodel
-                sm_p.stressmodel = smodel
-                sm_p.stress = sm_p.stressmodel.get_stress(squeeze=False).loc[:, sm_p.stress_names]
+            sm_snames = {sm_name: ml.stressmodels.get(sm_name).get_stress(squeeze=False).columns for sm_name in ml.stressmodels}
+            for sm_name, snames in sm_snames.items():
+                smodel = ml.stressmodels.get(sm_name)
+                do_update = (ml.name in sm_p.model_names) & (sm_name in sm_p.stressmodel_names) & (smodel is not None)
+                snames_to_update = [sname for sname in snames if sname in sm_p.stress_names]
+                if (len(snames_to_update) > 0) & do_update:
+                    # get df of updated (parameterised and interpolated) stress TimeSeries for model
+                    updated_stress_df = sm_p.interpolate_stresses(**sm_p.interp_kwargs)
+                    for stress_series in smodel.stress:
+                        if stress_series.name in sm_p.stress_names:
+                            stress_series.series_original = updated_stress_df.loc[
+                                :, stress_series.name
+                            ]
+                    ml.stressmodels[sm_name] = smodel
     # ^^ one sm_p even for many pastas models in one pest cal will work ok - we just update the stress rates,
     # while pumping well distances from each model (obs bore) remain as originally defined per model.
     # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
 
     # simulate
+    stress_obs_done = []  # This is a list of stress obs indices we have already processed in an earlier pastas model in the below loop.
+    # We only want to process stress_obs once, not repeatedly for every model (the same stresses (stress Series names) may be reused across all models)
     for ml in models:
         ml_name = ml.name
         #ml.settings["tmax"] = None
@@ -68,21 +70,23 @@ def run() -> None:
             #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
             #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
         )
-        simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y")
+        simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # save head_diffs too
         head_diffs = (simulation - simulation.shift().values).dropna()
-        head_diffs.to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv", date_format="%d/%m/%Y")
+        head_diffs.to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # smp-style zero-weight obs
         sim_smp = simulation.resample("ME").mean()
-        sim_smp.to_csv(fpath / f"simulation_{ml_name}.smp.csv", date_format="%d/%m/%Y")
+        sim_smp.to_csv(fpath / f"simulation_{ml_name}.smp.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # stress obs
         for sm_p in stressmodel_parameterisers:
-            if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
+            if (sm_p.obs_data is not None) and (ml_name in sm_p.model_names) and \
+                    (sm_p.parameteriser_name not in stress_obs_done):
                 stress_mod = sm_p.mod2obs()
-                stress_mod.to_csv(f"{sm_p.stressmodel_name}.stress_obs.csv", date_format=sm_p.date_format)
+                stress_mod.to_csv(f"{sm_p.parameteriser_name}.stress_obs.csv", date_format=sm_p.date_format, float_format='%.16f')
+                stress_obs_done += [sm_p.parameteriser_name]  # one set of obs per parameteriser
 
         # stress contributions
         if save_stress_contributions:
@@ -112,7 +116,7 @@ def run() -> None:
                 var_name="column_names",
                 value_name="Observations",
             ).set_index(["column_names","date"])
-            contribs_all.to_csv(fpath / f"simulation_stress_contributions_{ml_name}.csv", date_format="%d/%m/%Y")
+            contribs_all.to_csv(fpath / f"simulation_stress_contributions_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
@@ -129,10 +133,7 @@ def run_pypestworker(
 ) -> None:
     from logging import getLogger
 
-    from pastas_plugins.pest.parameterisers import (  # noqa: F401
-        BaseParameteriser,
-        WellModelParameteriser,
-    )
+    from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
     from pandas import concat
 
     ppw = pyemu.os_utils.PyPestWorker(
@@ -162,6 +163,8 @@ def run_pypestworker(
             og for og in observation_index.index.get_level_values("obgnme").unique() \
             if og.find("headdiff") >= 0
         ]
+        stress_obs_done = [] # This is a list of stress obs indices we have already processed in an earlier pastas model in the below loop.
+        # We only want to process stress_obs once, not repeatedly for every model (the same stresses (stress Series names) may be reused across all models)
         for ml_name, ml in models.items():
             #ml.settings["tmax"] = None
             ml_code = ml.oseries.metadata["ml_code"]
@@ -173,22 +176,37 @@ def run_pypestworker(
                     ml.set_parameter(pname[len(ml_code):], optimal=val)
             # update stress TimeSeries
             for sm_p in stressmodel_parameterisers:
-                smodel = ml.stressmodels.get(sm_p.stressmodel_name)
-                if smodel is not None:
-                    sm_p_parnames = sm_p.stress_pars.parnme
-                    new_par_values = pvals.loc[sm_p_parnames].values
-                    # get df of updated (parameterised and interpolated) stress TimeSeries for model
-                    interp_kwargs = sm_p.interp_kwargs
-                    interp_kwargs["updated_sourcevals"] = new_par_values
-                    updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
-                    for stress_series in smodel.stress:
-                        if stress_series.name in sm_p.stress_names:
-                            stress_series.series_original = updated_stress_df.loc[
-                                :, stress_series.name
-                            ]
-                    ml.stressmodels[sm_p.stressmodel_name] = smodel
-                    sm_p.stressmodel = smodel
-                    sm_p.stress = sm_p.stressmodel.get_stress(squeeze=False).loc[:, sm_p.stress_names]
+                sm_snames = {sm_name: ml.stressmodels.get(sm_name).get_stress(squeeze=False).columns for sm_name in ml.stressmodels}
+                for sm_name, snames in sm_snames.items():
+                    smodel = ml.stressmodels.get(sm_name)
+                    do_update = (ml.name in sm_p.model_names) & (sm_name in sm_p.stressmodel_names) & (smodel is not None)
+                    snames_to_update = [sname for sname in snames if sname in sm_p.stress_names]
+                    if (len(snames_to_update) > 0) & do_update:
+                        sm_p_parnames = sm_p.stress_pars.parnme
+                        new_par_values = pvals.loc[sm_p_parnames].values
+                        # get df of updated (parameterised and interpolated) stress TimeSeries for model
+                        interp_kwargs = sm_p.interp_kwargs
+                        interp_kwargs["updated_sourcevals"] = new_par_values
+                        updated_stress_df = sm_p.interpolate_stresses(**interp_kwargs)
+                        for stress_series in smodel.stress:
+                            if stress_series.name in sm_p.stress_names:
+                                stress_series.series_original = updated_stress_df.loc[
+                                    :, stress_series.name
+                                ]
+                        ml.stressmodels[sm_name] = smodel
+
+                        # stress obs
+                        stress_obs_rates = stress_obs.loc[stress_obs.obs_type == "stress_obs"]
+                        if (not stress_obs_rates.empty) and (sm_p.obs_data is not None):
+                            stress_mod = sm_p.mod2obs()
+                            # reindex with pest obsnme
+                            obsnmes = stress_obs_rates.loc[stress_mod.index].obsnme
+                            stress_mod.index = obsnmes.values
+                            stress_mod = stress_mod.loc[~stress_mod.index.isin(stress_obs_done)]  # avoid repeated processing of obs
+                            # store the series
+                            if not stress_mod.empty:
+                                stress_obs_list.append(stress_mod)
+                                stress_obs_done += stress_mod.index.to_list()
 
             # run simulation
             sim = ml.simulate(
@@ -225,18 +243,6 @@ def run_pypestworker(
             sim_smp_vals = (sim_smp.loc[sim_dateidx_obsnme.index])
             sim_smp_vals.index = sim_dateidx_obsnme.obsnme
             headsmp_list.append(sim_smp_vals) #f"simulation_{ml_name}.smp.csv"
-
-            # stress obs
-            stress_obs_rates = stress_obs.loc[stress_obs.obs_type == "stress_obs"]
-            if stress_obs is not None:
-                for sm_p in stressmodel_parameterisers:
-                    if (sm_p.obs_data is not None) and (sm_p.model.name == ml_name):
-                        stress_mod = sm_p.mod2obs()
-                        # reindex with pest obsnme
-                        obsnmes = stress_obs_rates.loc[stress_mod.index].obsnme
-                        stress_mod.index = obsnmes.values
-                        # store the series
-                        stress_obs_list.append(stress_mod)
 
             # stress contributions
             if save_stress_contributions:

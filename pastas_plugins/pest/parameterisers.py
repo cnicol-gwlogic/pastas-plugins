@@ -1,5 +1,4 @@
 import sys
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from logging import getLogger
 from pathlib import Path
@@ -15,18 +14,17 @@ from pastas import Model
 from pastas.stressmodels import StressModel, WellModel
 from pastas.timeseries_utils import _frequency_is_supported
 from pypestutils.pestutilslib import PestUtilsLib
-
 from pastas_plugins.pest.solver import PestSolver
 
 pputils = PestUtilsLib()  # the constructor searches for the shared lib
 logger = getLogger(__name__)
 
 __all__ = [
-    "WellModelParameteriser",
+    "Parameteriser",
 ]
 
 
-class BaseParameteriser(ABC):
+class Parameteriser:
     """
     Custom PEST parameteriser base class for StressModel stresses.
     Designed to be first instantiated outside the PestSolver for a given StressModel,
@@ -34,38 +32,78 @@ class BaseParameteriser(ABC):
 
     Parameters
     ----------
-    model : pastas.Model
-        Pastas model.
-    stressmodel_name : str
-        Name of StressModel for which to apply StressModel.stress rate parameters to via PEST.
+    parameteriser_name: str
+        Base name used in PEST stress parameter files for this parameteriser instance.
+    stresses: DataFrame
+        Stressmodel stresses dataframe, for exampple attained from stressmodel.get_stress(squeeze=False), or
+        a subset of that. These are the stress Timeseries across all models in models list and stressmodel_names list
+        that will be updated by this parameteriser.
+    model_ws: str
+        Model working directory.
+    model_names: list
+        List of model names for which the stresses provided will be updated.
+    stressmodel_names: list,
+        List of stressmodel names for which the stresses provided will be updated.
     date_format : Optional[str]
         Datetime format for saving PEST model parameter input files for stressmodel. Default is \"%d/%m/%Y %H:%M:%S\".
     interp_kwargs : Optional[dict[str, Any]]
         kwargs to pass to BaseParameteriser.interpolate_stresses(). Default is {}.
+    par_freq : str | None, optional
+        If 'at_rate_changes': pilot points are placed at rate step change points (and first record). Covariance
+        range of these points is then defined based on the median time interval between adjacent pilot points
+        (multiplied by t_variogram_range_freq_factor, and capped by max_vario_range; see below).
+        Otherwise: Frequency at which temporal WellModel rate pilot points are defined for each stress in stress_names.
+        Must be None or one of the following: (D, h, m, s, ms, us, ns) or a multiple of that e.g. "7D".
+        If None, a single (constant-in-time) stress rate parameter is defined for all stresses in stress_names.
+        Default is None.
+    t_variogram_range_freq_factor: float, optional
+        par_freq factor to define temporal variogram range to build a parameter covariance matrix for input to
+        pyemu.helpers.first_order_pearson_tikhonov(). Default is 2.0, so for example if par_freq is 365D, this means
+        pars covary up to the sill variance over 730D.
+    max_vario_range Optional[float] :
+        Maximum variogram range for temporal interpolation points (units: days). Default is 730.0.
+    t_variogram_sill: float, optional
+        Temporal variogram sill (variance at t_variogram_range) used to build a scaling parameter
+        covariance matrix for input to pyemu.helpers.first_order_pearson_tikhonov().
+        If PestSolver.par_transform == "log", then this must pertain to the log of the parameters.
+        If par_freq is None, t_variogram_sill is used to define parameter variance in the returned
+        diagonal prior (co)variance matrix. Default is 1.0.
+        t_variogram_sill is ignored if par_bounds is provided.
+    par_bounds: Optional[DataFrame| None]
+        DataFrame multiindexed by [stressmodel stress TimeSeries name (bore), Datetime].
+        Columns must include 'parlbnd' and 'parubnd'; these must be in untransformed parameter space.
+        Assigned to nearest pilot point in time to Datetime (depends on par_freq).
+        Bounds will be used to define interpolation and covariance sill value (variance) by dividing par range
+        by 4.0 and squaring that (95%CI assumed); that variance overrides t_variogram_sill if par_bounds is provided.
+    stress_minmax_dates : NOT USED ANYMORE TODO: REMOVE Optional[DataFrame| None]
+        Dataframe indexed by stressmodel stress TimeSeries name (bore), with columns of min_date and max_date for
+        non-zero stress values. min_date and max_date can contain null (NaT) values, in which case min and max dates
+        for non-zero stress values are set to the min/max date of the stressmodel stresses. Stress parameters outside
+        of this date range are fixed at zero.
 
     Attributes
     ----------
+    stress : DataFrame | Series
+        Stressmodel stress TimeSeries.  Series if a single stress, DataFrame if multiple (eg WellModel)
+    stress_pars : DataFrame
+        DataFrame of stressmodel.stress parameterisation info, as returned by solver.pf (pyemu.PestFrom).
+    stress_parcov  : pyemu.Cov
+        Prior covariance matrix for the WellModel parameters defined through this class.
+        For use in building PEST uncertainty (.unc) files.
     modelfile : Path
         PestSolver model input file for scaling (optimising) stressmodel stresses during PEST runs.
     modelfile_df_org : DataFrame
         DataFrame of original PestSolver model input file for scaling (optimising) stressmodel stresses during PEST runs.
-    stress : DataFrame | Series
-        Stressmodel stress TimeSeries.  Series if a single stress, DataFrame if multiple (eg WellModel)
     krig_factorfile : Path
         Path to kriging factors file for use during PestSolver.run() calls.
     krig_mpts : int
         Number of kriging target points.
-    stress_pars : DataFrame
-        DataFrame of stressmodel.stress parameterisation info, as returned by solver.pf (pyemu.PestFrom).
-    stress_parcov  : pyemu.Cov
-        Prior covariance matrix for the WellModel parameters defined through this class. For use in building PEST uncertainty (.unc) files.
-
     Returns
     -------
     None
     """
 
-    _name = "BaseParameteriser"
+    _name = "Parameteriser"
 
     def __getstate__(self):
         # Exclude the logger and its handlers from the state to be pickled
@@ -79,38 +117,52 @@ class BaseParameteriser(ABC):
         self.__dict__.update(state)
         logger = getLogger(__name__)  # noqa: F841
 
-    @abstractmethod
     def __init__(
         self,
-        model: Model,
-        stressmodel_name: str,
+        parameteriser_name: str,
+        stresses: DataFrame,
+        model_ws: str,
+        model_names: list,
+        stressmodel_names: list,
         date_format: Optional[str] = "%d/%m/%Y",
         interp_kwargs: Optional[dict[str, Any]] = {},
+        par_freq: str | None = None,
+        t_variogram_range_freq_factor: float | None = None,
+        max_vario_range: Optional[float] = 730.0,
+        t_variogram_sill: float = 1.0,
+        par_bounds: Optional[DataFrame | None] = None,
     ) -> None:
-        self.model = model
-        self.stressmodel_name = stressmodel_name
-        self.stressmodel = self._validate_stressmodel_name(sname=stressmodel_name)
         self.date_format = date_format
         self.interp_kwargs = interp_kwargs
 
         # PestSolver related things.
-        # These are designed to be populated on 'BaseParameteriser.solver = solver' calls from within the PestSolver.
-        self._solver = None
-        self.model_ws = None
-        self.modelfile = None
+        self.model_ws = model_ws
+        self.model_names = model_names
+        self.stressmodel_names = stressmodel_names
+        self.parameteriser_name = parameteriser_name
+        self.modelfile = Path(
+            self.model_ws / f"{self.parameteriser_name}.stress_pars.csv"
+        )
         self.modelfile_df_org = None
 
         # Stress TimeSeries
-        self.stress = (
-            self.stressmodel.get_stress()
-        )  # not sure Series-based stressmodels can handle squeeze argument
-        if isinstance(self.stressmodel, WellModel):
-            self.stress = self.stressmodel.get_stress(squeeze=False)
+        self.stress = stresses
         self.stress_names = self.stress.columns.to_list()
         # stress obs data
         self.obs_data = None
 
         # Parameterisation things
+        if par_freq:
+            if par_freq.lower() == "at_rate_changes":
+                self.par_freq = par_freq
+            else:
+                self.par_freq = _frequency_is_supported(par_freq)
+        else:
+            self.par_freq = None
+        self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
+        self.t_variogram_sill = t_variogram_sill
+        self.max_vario_range = max_vario_range
+        self.par_bounds = par_bounds
         self.source_points = None
         self.target_points = None
         self.krig_factorfile = None
@@ -118,44 +170,6 @@ class BaseParameteriser(ABC):
         self.stress_pars = None
         self.stress_parcov = None
         self._parnme_indexer = None
-
-    def _validate_stressmodel_name(
-        self,
-        sname: str,
-    ) -> StressModel:
-        """
-        Return StressModel of given name. If stressmodel.name is not in model.stressmodels
-        or it is not a WellModel, an error is raised end execution ceases.
-        """
-        try:
-            smodel = self.model.stressmodels.get(sname)
-        except KeyError:
-            logger.exception(
-                f"StressModel.name {sname} not found in Model {self.model.name}."
-            )
-            sys.exit()
-        if isinstance(self, WellModelParameteriser) and not isinstance(
-            smodel, WellModel
-        ):
-            logger.error(
-                f"StressModel.name {sname} does not refer to a WellModel instance. This is required for {self._name}"
-            )
-            sys.exit()
-        else:
-            return smodel
-
-    @property
-    def solver(self) -> PestSolver:
-        return self._solver
-
-    @solver.setter
-    def solver(self, solver: PestSolver) -> None:
-        """Defines model solver object and related attributes for this BaseParameteriser instance."""
-        self._solver = solver
-        self.model_ws = solver.model_ws
-        self.modelfile = Path(
-            solver.model_ws / f"{self.stressmodel.name}.stress_pars.csv"
-        )
 
     @staticmethod
     def _source_pts_minmax_range(source_points: DataFrame) -> float:
@@ -199,6 +213,7 @@ class BaseParameteriser(ABC):
     def _get_ppoint_cov(
         self,
         source_points: DataFrame,
+        solver: PestSolver,
     ) -> None:
         """
         Generate 2d kriging pilot point covariance matrix for each stressmodel stress timeseries,
@@ -218,7 +233,7 @@ class BaseParameteriser(ABC):
         if self.par_bounds is not None:
             sill = self.par_bounds.loc[self.source_points.index, ["parubnd", "parlbnd"]]
             if "partrans" not in sill.columns:
-                sill["partrans"] = "log" if self.solver.par_transform == "log" else "none"
+                sill["partrans"] = "log" if solver.par_transform == "log" else "none"
             logmask = sill.partrans == "log"
             if logmask.any():
                 sill_mins = sill.loc[logmask].groupby(level="column_names")["parlbnd"].transform(
@@ -285,7 +300,7 @@ class BaseParameteriser(ABC):
         self,
         source_points: DataFrame,
         target_points: DataFrame,
-    ) -> npt.NDArray[np.float64]:
+    ) -> None:
         """
         Generate 2d kriging factors file.
 
@@ -298,8 +313,7 @@ class BaseParameteriser(ABC):
 
         Returns
         -------
-        npt.NDArray[np.float64]
-            2D matrix covmat(source_points.shape[0], npts) for source_points.
+        None
         """
         # calc_kriging_factors_2d(ecs, ncs, zns, ect, nct, znt, vartype<1:spher, 2:exp, 3:gauss, 4:pow>, krigtype, aa, anis, bearing, searchrad, maxpts, minpts, factorfile, factorfiletype)
         # # ^ first 6 vars: x, y, zone of source and target points
@@ -325,7 +339,7 @@ class BaseParameteriser(ABC):
             factorfile=self.krig_factorfile,
             factorfiletype=0,
         )
-        return self._get_ppoint_cov(source_points)
+        return
 
     @staticmethod
     def _interpolate(
@@ -421,6 +435,7 @@ class BaseParameteriser(ABC):
         invpow=2.0,
         method: Literal["inv_dist_weighted", "step", "kriging"] = "inv_dist_weighted",
         updated_sourcevals: Optional[Series | None] = None,
+        stress_names: Optional[list | None] = None,
     ) -> None:
         """
         Class method for PestSolver.run() to interpolate stress pilot point interpolation
@@ -444,6 +459,9 @@ class BaseParameteriser(ABC):
             Optional Series (indexed by PEST parnme) of interpolation pilot point source values per PEST
             parnme for this WellModelParameteriser instance. Provided by a PyPestWorker instance for example.
             If None, then (x)Parameteriser.modelfile is read to obtain these values. Default is None.
+        stress_names: Optional[list | None],
+            Optional list of stressmodel stress names (istress column names in stressmodel.get_stress() df)
+            which will be updated. Default is None.
 
         Returns
         -------
@@ -452,7 +470,7 @@ class BaseParameteriser(ABC):
         """
         if updated_sourcevals is None:  # non-pypestworker call (worker dirs on disk)
             sourcevals = pd.read_csv(
-                self.modelfile,
+                self.modelfile.name,
                 index_col=["column_names", "Datetime"],
                 parse_dates=["Datetime"],
                 date_format=self.date_format,
@@ -463,6 +481,8 @@ class BaseParameteriser(ABC):
             sourcevals = sourcevals.reset_index(drop=False).set_index(["column_names","Datetime"])
 
         krig_cols = self.stress_names
+        if stress_names is not None:
+            krig_cols = stress_names
         source_stresses = self.stress.copy()  # crosstab with columns of stressmodel rate timeseries (per bore). Index is datetime
 
         if method == "step":
@@ -482,6 +502,7 @@ class BaseParameteriser(ABC):
                 logger.warning(
                     "Kriging not currently supported with pypestworker runs via PestSolver"
                 )
+                self._calc_factors_2d(self.source_points, self.target_points)
                 kwargs_pputils = dict(
                     factorfile=self.krig_factorfile,
                     factorfiletype=0,
@@ -528,17 +549,12 @@ class BaseParameteriser(ABC):
             targval = None
 
         # replace stressmodel.stress
-        for idx, stress_series in enumerate(self.stressmodel.stress):
-            if stress_series.name in self.stress_names:
-                self.stressmodel.stress[idx].series_original = source_stresses.loc[
-                    :, stress_series.name
-                ]
-        self.stress = self.stressmodel.get_stress(squeeze=False).loc[:, self.stress_names]
+        self.stress.loc[:, krig_cols] = source_stresses.loc[:, krig_cols]
 
         for var in [sourcevals, source_stresses, krig_cols]:
             var = None
 
-        return self.stress  # self.stress #self.stressmodel.stress
+        return self.stress
 
     def add_stress_obs(
             self,
@@ -581,123 +597,7 @@ class BaseParameteriser(ABC):
 
         return modobs
 
-class WellModelParameteriser(BaseParameteriser):
-    """
-    Custom WellModel stress parameteriser.
-    Designed to be first instantiated outside the PestSolver for a given StressModel,
-    and then passed to PestSolver via the stressmodel_parameterisers argument.
-
-    Parameters
-    ----------
-    model : pastas.Model
-        Pastas model.
-    wellmodel_name : str
-        WellModel.name for which to apply WellModel.stress rate parameters to. Must refer to a WellModel object.
-    date_format : Optional[str]
-        Datetime format for saving PEST model parameter input files for stressmodel. Default is \"%d/%m/%Y\".
-    interp_kwargs : Optional[dict[str, Any]]
-        kwargs to pass to BaseParameteriser.interpolate_stresses(). Default is {}.
-    stress_names : list[str] | None, optional
-        List of WellModel.stress.TimeSeries names for which stress rate parameters are to be optimised.
-        If None, all stresses in the wellmodel are parameterised. Default is None.
-    par_freq : str | None, optional
-        If 'at_rate_changes': pilot points are placed at rate step change points (and first record). Covariance
-        range of these points is then defined based on the median time interval between adjacent pilot points
-        (multiplied by t_variogram_range_freq_factor, and capped by max_vario_range; see below).
-        Otherwise: Frequency at which temporal WellModel rate pilot points are defined for each stress in stress_names.
-        Must be None or one of the following: (D, h, m, s, ms, us, ns) or a multiple of that e.g. "7D".
-        If None, a single (constant-in-time) stress rate parameter is defined for all stresses in stress_names.
-        Default is None.
-    t_variogram_range_freq_factor: float, optional
-        par_freq factor to define temporal variogram range to build a parameter covariance matrix for input to
-        pyemu.helpers.first_order_pearson_tikhonov(). Default is 2.0, so for example if par_freq is 365D, this means
-        pars covary up to the sill variance over 730D.
-    max_vario_range Optional[float] :
-        Maximum variogram range for temporal interpolation points (units: days). Default is 730.0.
-    t_variogram_sill: float, optional
-        Temporal variogram sill (variance at t_variogram_range) used to build a scaling parameter
-        covariance matrix for input to pyemu.helpers.first_order_pearson_tikhonov().
-        If PestSolver.par_transform == "log", then this must pertain to the log of the parameters.
-        If par_freq is None, t_variogram_sill is used to define parameter variance in the returned
-        diagonal prior (co)variance matrix. Default is 1.0.
-        t_variogram_sill is ignored if par_bounds is provided.
-    par_bounds: Optional[DataFrame| None]
-        DataFrame multiindexed by [stressmodel stress TimeSeries name (bore), Datetime].
-        Columns must include 'parlbnd' and 'parubnd'; these must be in untransformed parameter space.
-        Assigned to nearest pilot point in time to Datetime (depends on par_freq).
-        Bounds will be used to define interpolation and covariance sill value (variance) by dividing par range
-        by 4.0 and squaring that (95%CI assumed); that variance overrides t_variogram_sill if par_bounds is provided.
-    stress_minmax_dates : NOT USED ANYMORE TODO: REMOVE Optional[DataFrame| None]
-        Dataframe indexed by stressmodel stress TimeSeries name (bore), with columns of min_date and max_date for
-        non-zero stress values. min_date and max_date can contain null (NaT) values, in which case min and max dates
-        for non-zero stress values are set to the min/max date of the stressmodel stresses. Stress parameters outside
-        of this date range are fixed at zero.
-
-    Attributes
-    ----------
-    model_file : Path
-        Path to parameterised model input file to be used by solver.run(),
-        with pest tpl file to be constructed using pyemu.PestFrom.add_parameters()
-    krig_factorfile : Path
-        Path to kriging factors file for use during PestSolver.run() calls.
-    stress_pars : DataFrame
-        DataFrame of stressmodel.stress parameterisation info, as returned by solver.pf (pyemu.PestFrom).
-    stress_parcov  : pyemu.Cov
-        Prior covariance matrix for the WellModel parameters defined through this class.
-        For use in building PEST uncertainty (.unc) files.
-
-    Returns
-    -------
-    None
-    """
-
-    _name = "WellModelParameteriser"
-
-    def __init__(
-        self,
-        model: Model,
-        wellmodel_name: str,
-        date_format: Optional[str] = "%d/%m/%Y",
-        interp_kwargs: Optional[dict[str, Any]] = {},
-        stress_names: list[str] | None = None,
-        par_freq: str | None = None,
-        t_variogram_range_freq_factor: float | None = None,
-        max_vario_range: Optional[float] = 730.0,
-        t_variogram_sill: float = 1.0,
-        par_bounds: Optional[DataFrame | None] = None,
-        #stress_minmax_dates: Optional[DataFrame | None] = None,
-    ) -> None:
-        BaseParameteriser.__init__(
-            self,
-            model=model,
-            stressmodel_name=wellmodel_name,
-            date_format=date_format,
-            interp_kwargs=interp_kwargs,
-        )
-
-        if (
-            stress_names is not None
-        ):  # replace default all stress_names (from BaseParameteriser.__init__() with only a selection to parameterise
-            self.stress_names = stress_names
-        logger.info(
-            rf"Modelling {len(self.stress_names)} stress names in {wellmodel_name}:\n --> {', '.join(self.stress_names)}"
-        )
-        if par_freq:
-            if par_freq.lower() == "at_rate_changes":
-                self.par_freq = par_freq
-            else:
-                self.par_freq = _frequency_is_supported(par_freq)
-        else:
-            self.par_freq = None
-        self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
-        self.t_variogram_sill = t_variogram_sill
-        self.max_vario_range = max_vario_range
-        self.par_bounds = par_bounds
-
-        # filter stress based on provided wellmodel_names
-        self.stress = self.stress.filter(items=self.stress_names, axis="columns")
-
-    def _get_stress_pars(self, par_name_base: str) -> DataFrame:
+    def _get_stress_pars(self, solver: PestSolver, par_name_base: str) -> DataFrame:
         """Build interpolation source points for None, "par_freq" and "at_rate_changes" methods"""
         if self.par_freq == "at_rate_changes":
             source_points = self.stress.diff().melt(
@@ -745,13 +645,13 @@ class WellModelParameteriser(BaseParameteriser):
                 .intervals
             )
             source_points.loc[:, "vario_ranges"] = (
-                source_points.median_intervals * self.t_variogram_range_freq_factor
+                    source_points.median_intervals * self.t_variogram_range_freq_factor
             ).clip(upper=self.max_vario_range)
 
         elif self.par_freq is not None:  # regular frequency pilot points
             stress_pars = self.stress.resample(self.par_freq).first()
             if (
-                self.stress.index.max() not in stress_pars.index
+                    self.stress.index.max() not in stress_pars.index
             ):  # include the last time so we don't get boundary effects in the interp
                 stress_pars.reindex(
                     stress_pars.index.to_list() + [self.stress.index.max()]
@@ -764,8 +664,8 @@ class WellModelParameteriser(BaseParameteriser):
             source_points["x"] = self._dtindex_to_days_elapsed(source_points.index)
             # define geostat variogram range for parameter interpolation (in krig_t space)
             self.t_variogram_range = (
-                pd.to_timedelta(self.par_freq) * self.t_variogram_range_freq_factor
-            ).total_seconds() / 86400.0
+                                             pd.to_timedelta(self.par_freq) * self.t_variogram_range_freq_factor
+                                     ).total_seconds() / 86400.0
             source_points.loc[:, "vario_ranges"] = min(
                 self.t_variogram_range, self.max_vario_range
             )
@@ -773,7 +673,7 @@ class WellModelParameteriser(BaseParameteriser):
             stress_pars = None
 
         elif (
-            self.par_freq is None
+                self.par_freq is None
         ):  # - a single parameter per stress TimeSeries, which is applied constant in time
             # constant-in-time scaling parameter applied
             source_points = self.stress.iloc[[0], :].melt(
@@ -800,30 +700,26 @@ class WellModelParameteriser(BaseParameteriser):
         source_points.to_csv(
             self.modelfile, date_format=self.date_format
         )  # parameterised by pstfrom
-        copy_file(self.modelfile, self.solver.temp_ws / self.modelfile.name)
+        copy_file(self.modelfile, solver.temp_ws / self.modelfile.name)
 
         index_cols = [source_points.index.name, "column_names"]
         use_cols = ["value"]
         pargp_indices = (
-            source_points.column_names != source_points.column_names.shift()
+                source_points.column_names != source_points.column_names.shift()
         ).cumsum()
         pargp = pargp_indices.apply(
-            lambda s: f"wellq.{self.stressmodel.name}.{str(s).zfill(2)}"
+            lambda s: f"{self.parameteriser_name}.{str(s).zfill(2)}"
         ).to_list()
 
-        self.stress_pars = self.solver.pf.add_parameters(
+        self.stress_pars = solver.pf.add_parameters(
             self.modelfile,
             index_cols=index_cols,
             use_cols=use_cols,
             par_type="grid",
             par_style="direct",
-            transform=self.solver.par_transform,
+            transform=solver.par_transform,
             pargp=pargp,
             par_name_base=par_name_base,
-            # lower_bound=self.ml.parameters.loc[self.vary, "pmin"].values.tolist(),
-            # upper_bound=self.ml.parameters.loc[self.vary, "pmax"].values.tolist(),
-            # ult_lbound = self.ml.parameters.loc[self.vary, ["pmin"]].transpose().values.tolist(),
-            # ult_ubound = self.ml.parameters.loc[self.vary, ["pmax"]].transpose().values.tolist(),
         )
 
         for var in [pargp, pargp_indices]:
@@ -831,13 +727,15 @@ class WellModelParameteriser(BaseParameteriser):
 
         return source_points
 
-    def add_stress_parameters(self, par_name_base: str) -> None:
+    def add_stress_parameters(self, solver, par_name_base: str) -> None:
         """
         Add WellModel pumping rate parameters for PestSolver.model.pf (pyemu.PstFrom) for each WellModel stress TimeSeries.
         Modifies the solver.pf (pyemu.PstFrom) object in-place on calling this function.
 
         Parameters
         ----------
+        solver : PestSolver
+            PestSolver instance from which this function is called on this stressmodel parameteriser.
         par_name_base : str
             PEST parameter name base to provide to self.pf (pyemu.PstFrom). Required, because each WellModelParameteriser
             instance should have a unique parameter base name.
@@ -846,17 +744,9 @@ class WellModelParameteriser(BaseParameteriser):
         -------
         None
         """
-        # check that solver is defined first. It must be for this method to operate.
-        if self.solver is None:
-            logger.error(
-                "Solver not yet defined for {self._name}, so can't add stress parameters yet.\n\
-                         Define a solver before calling f{self._name}.add_stress_parameters()"
-            )
-            sys.exit()
-
         if (
-            self.solver.par_transform == "log"
-            and self.t_variogram_range_freq_factor is not None
+                solver.par_transform == "log"
+                and self.t_variogram_range_freq_factor is not None
         ):
             logger.warning(
                 't_variogram_sill provided to PestSolver.add_well_rate_parameters() must pertain to log-transfomed parameter space (PestSolver.par_transform == "log")'
@@ -874,7 +764,7 @@ class WellModelParameteriser(BaseParameteriser):
         )
         self.target_points = target_points
         # define source points for kriging / build pest tpl file
-        self.source_points = self._get_stress_pars(par_name_base)
+        self.source_points = self._get_stress_pars(solver, par_name_base)
 
         # build index between pest parnames from self.stress_pars and self.modelfile parameterised columns and indices.
         self._build_parnme_indexer()  # now self.parnme_indexer is gettable. Also adds a usecol field to the self.stress_pars df (and "index_org" - the original index values from stress df)
@@ -891,15 +781,15 @@ class WellModelParameteriser(BaseParameteriser):
         # Define rate parameter bounds
         # self.par_bounds is a multiiindex df of [TimeSeries name, datetime]: stress parubnd/parlbnd.
         if self.par_bounds is not None:
-            self.stress_pars.loc[:, ["parval1","partrans","parlbnd", "parubnd"]] = self.par_bounds.loc[
-                :, ["parval1","partrans","parlbnd", "parubnd"]
+            self.stress_pars.loc[:, ["parval1", "partrans", "parlbnd", "parubnd"]] = self.par_bounds.loc[
+                :, ["parval1", "partrans", "parlbnd", "parubnd"]
             ]
 
         # make pcov for pilot points
-        self._get_ppoint_cov(self.source_points)
+        self._get_ppoint_cov(self.source_points, solver)
 
         # and save a copy of self.modelfile data in memory for pypestworker updates
         self.modelfile_df_org = pd.read_csv(
-            self.modelfile, index_col=[1,0], date_format=self.date_format
+            self.modelfile, index_col=[1, 0], date_format=self.date_format
         )
         self.modelfile_df_org["parnme"] = self.source_points.parnme

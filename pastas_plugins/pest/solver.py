@@ -91,7 +91,7 @@ class PestSolver(BaseSolver):
         add_tikhonov_reg : bool, optional
             Whether to apply preferred-value regularisation in the pest control file.
             Default is False.
-        stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.BaseParameteriser] | None, optional
+        stressmodel_parameterisers : list[pastas_plugins.pest.parameterisers.Parameteriser] | None, optional
             Parameteriser objects for StressModel(s), defining how to parameterise each StressModel via PEST.
             Default is None.
         obs_diff : bool, optional
@@ -407,12 +407,12 @@ class PestSolver(BaseSolver):
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
             if sm_p.obs_data is not None:
-                obs_stress_file = self.model_ws / f"{sm_p.stressmodel_name}.stress_obs.csv"
+                obs_stress_file = self.model_ws / f"{sm_p.parameteriser_name}.stress_obs.csv"
                 sm_p.obs_data.to_csv(obs_stress_file, date_format=sm_p.date_format)
                 copy_file(obs_stress_file, self.temp_ws)
                 sm_p.obs_data.name = "Observations"
                 sm_p_obs = sm_p.obs_data.to_frame()
-                sm_p_obs.loc[:, "model_name"] = ml_name
+                sm_p_obs.loc[:, "model_name"] = None # parameterisers not specific to a single model in v2, so stress_obs aren't either, as they are defined through the parameteriser
                 sm_p_obs.loc[:, "obs_type"] = "stress_obs"
                 sm_p_obs.loc[:, "weight"] = 1.0
                 stress_obs_list.append(sm_p_obs)
@@ -525,10 +525,10 @@ class PestSolver(BaseSolver):
 
     def _update_stress_obs_names(
             self,
-            ml_name: str,
+            ml_name: str | None,
             obs_types: list,
-            date_format="%d/%m/%Y",
-            rsplit_column_name=True,
+            date_format: str = "%d/%m/%Y",
+            rsplit_column_name: bool = True,
     ) -> None:
         """
         Add pest obsnme and obgnme to self.stress_obs dataframe. Designed to be called
@@ -545,9 +545,11 @@ class PestSolver(BaseSolver):
             tmp_obs["column_names"] = tmp_obs.column_names.apply(
                 lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1]}"
             ) # these are lower case because pest obsnme is (from which column_names is derived - above)
-        omask = (self.stress_obs.model_name == ml_name) & \
-                (self.stress_obs.obs_type.isin(obs_types))
+        omask = self.stress_obs.obs_type.isin(obs_types)
+        if ml_name is not None:
+            omask = omask & (self.stress_obs.model_name == ml_name)
         join_obs = self.stress_obs.loc[omask].copy()
+
         og_index0 = join_obs.index.levels[0]
         join_obs.index = join_obs.index.set_levels(
             join_obs.index.levels[0].str.lower(),
@@ -563,6 +565,7 @@ class PestSolver(BaseSolver):
         join_obs.index = join_obs.index.set_levels(
             og_index0, level="column_names",
         ) # revert index column_names to og case
+
         self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.loc[:,["obsnme","obgnme"]]
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].set_index("obsnme").weight
 
@@ -634,13 +637,12 @@ class PestSolver(BaseSolver):
             for fp in Path(self.temp_ws).glob("*.parameteriser.pkl.gz"):
                 Path(fp).unlink(missing_ok=True)
             for sm_p in self.stressmodel_parameterisers:
-                sm_p.solver = self
-                sm_p.add_stress_parameters(par_name_base="sm")
+                sm_p.add_stress_parameters(solver=self, par_name_base="sm")
                 # pickle to disk for pest non-pypestworker workers
-                fname = self.temp_ws / f"{sm_p.stressmodel.name}.parameteriser.pkl.gz"
-                if not self.use_pypestworker:
-                    with gzip.open(fname, "wb") as f:
-                        dill.dump(sm_p, f)  # pickle
+                fname = self.temp_ws / f"{sm_p.parameteriser_name}.parameteriser.pkl.gz"
+                #if not self.use_pypestworker:
+                with gzip.open(fname, "wb") as f:
+                    dill.dump(sm_p, f)  # pickle
                 # add new parnmes to indexers (although there is no translation here, keys/values are same, but we need them to simplify later code in forward_run)
                 parnmes = sm_p.source_points.parnme.values
                 self.parameter_index.update(
@@ -727,16 +729,16 @@ class PestSolver(BaseSolver):
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
             if sm_p.obs_data is not None:
-                obsgp = f"stress_{sm_p.stressmodel_name}"
+                obsgp = f"stress_{sm_p.parameteriser_name}"
                 self.pf.add_observations(
-                    f"{sm_p.stressmodel_name}.stress_obs.csv",
+                    f"{sm_p.parameteriser_name}.stress_obs.csv",
                     index_cols=sm_p.obs_data.index.names,
                     use_cols=["Observations"],
                     obsgp=obsgp,
                 )
                 # add pest obsnme and obgnme to self.stress_obs for this last set of obs added to pst
                 self._update_stress_obs_names(
-                    ml_name=ml_name,
+                    ml_name=None,
                     obs_types=["stress_obs"],
                     date_format=sm_p.date_format,
                 )
@@ -879,7 +881,7 @@ class PestSolver(BaseSolver):
             pastas_parcov = None
             if self.stressmodel_parameterisers:
                 covmat_fname = str(
-                    self.temp_ws / f"pest.prior.{sm_p.stressmodel_name}.jcb"
+                    self.temp_ws / f"pest.prior.{sm_p.parameteriser_name}.jcb"
                 )
                 sm_p.stress_parcov.to_binary(covmat_fname)
                 for sm_p in self.stressmodel_parameterisers:
