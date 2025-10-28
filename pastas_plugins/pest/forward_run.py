@@ -8,7 +8,8 @@ def run() -> None:
 
     from dill import load as dill_load  # pickle
     from gzip import open as gz_open
-    from pandas import read_csv, concat
+    from pandas import read_csv, concat, date_range
+    from pandas.tseries.offsets import MonthEnd
     from pastas.io.base import load as load_model
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
@@ -60,24 +61,32 @@ def run() -> None:
     # while pumping well distances from each model (obs bore) remain as originally defined per model.
     # Pest-calibrated rates are the same across all pastas models, but distances of q wells from obs bores vary. Yay.
 
+    def _get_monthend_interpolant(ml, data):
+        """Interpolate from one datetime-indexed series or df to another at monthend intervals"""
+        smp_index = date_range(
+            ml.settings["tmin"], ml.settings["tmax"] + MonthEnd(0), freq="ME"
+        )
+        data = data.reindex(data.index.union(smp_index)).interpolate(method="time")
+        data = data.loc[smp_index]
+        return data
+
     # simulate
     stress_obs_done = []  # This is a list of stress obs indices we have already processed in an earlier pastas model in the below loop.
     # We only want to process stress_obs once, not repeatedly for every model (the same stresses (stress Series names) may be reused across all models)
     for ml in models:
         ml_name = ml.name
-        #ml.settings["tmax"] = None
-        simulation = ml.simulate(
-            #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-            #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-        )
-        simulation.loc[ml.observations().index].to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
+        simulation = ml.simulate()
+        sim_obs_idx = simulation.index.union(ml.observations().index)
+        sim_obs = simulation.reindex(sim_obs_idx).interpolate(method="time")
+        sim_obs = sim_obs.loc[ml.observations().index]
+        sim_obs.to_csv(fpath / f"simulation_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # save head_diffs too
-        head_diffs = (simulation - simulation.shift().values).dropna()
+        head_diffs = (sim_obs - sim_obs.shift().values).dropna()
         head_diffs.to_csv(fpath / f"simulation_head_diffs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # smp-style zero-weight obs
-        sim_smp = simulation.resample("ME").mean()
+        sim_smp = _get_monthend_interpolant(ml, simulation)
         sim_smp.to_csv(fpath / f"simulation_{ml_name}.smp.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
         # stress obs
@@ -90,12 +99,8 @@ def run() -> None:
 
         # stress contributions
         if save_stress_contributions:
-            contribs_all = ml.get_contributions(
-                split=True,
-                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-            ) # all contributions
-            contribs_all = [s.resample("ME").mean() for s in contribs_all] # downsample from daily. Should make this an option...
+            contribs_all = ml.get_contributions(split=True) # all contributions
+            contribs_all = [_get_monthend_interpolant(ml, s) for s in contribs_all] # downsample from daily. Should make this an option...
             contribs_all = concat(contribs_all, axis=1, ignore_index=False)
             ml_stress_groups = stress_contribution_groups.xs(ml_name)
             for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
@@ -134,7 +139,8 @@ def run_pypestworker(
     from logging import getLogger
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
-    from pandas import concat
+    from pandas import concat, date_range
+    from pandas.tseries.offsets import MonthEnd
 
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,
@@ -147,6 +153,15 @@ def run_pypestworker(
     pvals = ppw.get_parameters()
     if pvals is None:
         return None
+
+    def _get_monthend_interpolant(ml, data):
+        """Interpolate from one datetime-indexed series or df to another at monthend intervals"""
+        smp_index = date_range(
+            ml.settings["tmin"], ml.settings["tmax"] + MonthEnd(0), freq="ME"
+        )
+        data = data.reindex(data.index.union(smp_index)).interpolate(method="time")
+        data = data.loc[smp_index]
+        return data
 
     while True:
 
@@ -209,15 +224,15 @@ def run_pypestworker(
                                 stress_obs_done += stress_mod.index.to_list()
 
             # run simulation
-            sim = ml.simulate(
-                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-            )
+            sim = ml.simulate()
 
             # get head obs
             obs = observation_index.xs(ml.name)
             obs = obs.loc[obs.index.get_level_values("obgnme").isin(head_obsgps)].droplevel("obgnme") # xs-->df indexed by date. Values are just obsnme
-            obsvals = sim.loc[obs.index.values]
+            sim_obs_idx = sim.index.union(obs.index)
+            sim_obs = sim.reindex(sim_obs_idx).interpolate(method="time")
+            obsvals = sim_obs.loc[obs.index.values]
+            sim_obs = None
             # save head_diffs in case needed below (before we replace datetime index with obsnme index)
             head_diffs = (obsvals - obsvals.shift().values).dropna()
             onames = obs.obsnme
@@ -239,10 +254,10 @@ def run_pypestworker(
             sim_dateidx_obsnme = observation_index.xs(ml.name).loc[
                 observation_index.xs(ml.name).index.get_level_values("obgnme").isin(headsmp_obsgps)
             ].droplevel("obgnme") # xs-->df indexed by date. Values are just obsnme
-            sim_smp = sim.resample("ME").mean()
+            sim_smp = _get_monthend_interpolant(ml, sim)
             sim_smp_vals = (sim_smp.loc[sim_dateidx_obsnme.index])
             sim_smp_vals.index = sim_dateidx_obsnme.obsnme
-            headsmp_list.append(sim_smp_vals) #f"simulation_{ml_name}.smp.csv"
+            headsmp_list.append(sim_smp_vals)
 
             # stress contributions
             if save_stress_contributions:
@@ -250,13 +265,8 @@ def run_pypestworker(
                     (stress_obs.obs_type=="stress_contribution") & \
                     (stress_obs.model_name == ml.name)
                     ]
-                contribs_all = ml.get_contributions(
-                    split=True,
-                    #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                    #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-                )  # all contributions
-                contribs_all = [s.resample("ME").mean() for s in
-                                contribs_all]  # downsample from daily. Should make this an option...
+                contribs_all = ml.get_contributions(split=True)  # all contributions
+                contribs_all = [_get_monthend_interpolant(ml, s) for s in contribs_all]  # reindex to monthend via time interp. Should make this an option...
                 contribs_all = concat(contribs_all, axis=1, ignore_index=False)
                 ml_stress_groups = stress_contribution_groups.xs(ml_name)
                 for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):

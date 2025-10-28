@@ -12,6 +12,7 @@ import dill  # pickle
 import gzip
 import numpy as np
 import pandas as pd
+import pastas
 import pyemu
 from numpy.typing import NDArray
 from pandas import DataFrame,Series
@@ -307,6 +308,19 @@ class PestSolver(BaseSolver):
             data = data.assign(**other_col_data)
         return data
 
+    @staticmethod
+    def _get_monthend_interpolant(
+            ml: pastas.Model,
+            data: Series | DataFrame
+    ) -> Series | DataFrame:
+        """Interpolate from one datetime-indexed series or df to another at monthend intervals"""
+        smp_index = pd.date_range(
+            ml.settings["tmin"], ml.settings["tmax"] + pd.tseries.offsets.MonthEnd(0), freq="ME"
+        )
+        data = data.reindex(data.index.union(smp_index)).interpolate(method="time")
+        data = data.loc[smp_index]
+        return data
+
     def _get_stressmodel_contributions(self):
         """
         Returns a DataFrame with all stressmodel contributions specified through stress_contribution_groups parameter
@@ -320,13 +334,8 @@ class PestSolver(BaseSolver):
             fp.unlink(missing_ok=True)
         for ml_name, ml in self.models.items():
             # get all stress contributions for each model at a minimum.
-            contribs_all = ml.get_contributions(
-                split=True,
-                #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-            )  # all contributions
-            contribs_all = [s.resample("ME").mean() for s in
-                            contribs_all]  # downsample from daily. Should make this an option...
+            contribs_all = ml.get_contributions(split=True)  # all contributions
+            contribs_all = [PestSolver._get_monthend_interpolant(ml, s) for s in contribs_all]  # reindex to monthend via time interp. Should make this an option...
             contribs_all = pd.concat(contribs_all, axis=1, ignore_index=False)
             # if stress_contribution_groups are user-provided, sum those stress contributions up too.
             ml_stress_groups = self.stress_contribution_groups.xs(ml_name)
@@ -389,11 +398,9 @@ class PestSolver(BaseSolver):
 
             # smp style zero-weight head obs of full timeseries. For plotting ensemble hydrographs from pestpp-ies stack.
             # just monthly mean to avoid crazy big files; TODO: could make headsmp resampling an option for short sims.
+            sim_smp =PestSolver._get_monthend_interpolant(ml, ml.simulate())
             headsmp_obs = PestSolver._setup_base_obs(
-                ml.simulate(
-                    #tmin=ml.get_tmin(tmin=None, use_oseries=False, use_stresses=True),
-                    #tmax=ml.get_tmax(tmax=None, use_oseries=False, use_stresses=True),
-                ).resample("ME").mean(),
+                sim_smp,
                 obs_type="headsmp",
                 weight=0.0,
                 other_col_data={"model_name": ml_name},
