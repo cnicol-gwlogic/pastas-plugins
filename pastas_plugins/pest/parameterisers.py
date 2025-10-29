@@ -34,8 +34,8 @@ class Parameteriser:
     ----------
     parameteriser_name: str
         Base name used in PEST stress parameter files for this parameteriser instance.
-    stresses: DataFrame
-        Stressmodel stresses dataframe, for exampple attained from stressmodel.get_stress(squeeze=False), or
+    stress: DataFrame
+        Stressmodel stresses dataframe, for example attained from stressmodel.get_stress(squeeze=False), or
         a subset of that. These are the stress Timeseries across all models in models list and stressmodel_names list
         that will be updated by this parameteriser.
     model_ws: str
@@ -120,7 +120,7 @@ class Parameteriser:
     def __init__(
         self,
         parameteriser_name: str,
-        stresses: DataFrame,
+        stress: DataFrame,
         model_ws: str,
         model_names: list,
         stressmodel_names: list,
@@ -146,7 +146,7 @@ class Parameteriser:
         self.modelfile_df_org = None
 
         # Stress TimeSeries
-        self.stress = stresses
+        self.stress = stress
         self.stress_names = self.stress.columns.to_list()
         # stress obs data
         self.obs_data = None
