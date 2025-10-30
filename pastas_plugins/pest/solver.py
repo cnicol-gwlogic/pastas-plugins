@@ -330,7 +330,7 @@ class PestSolver(BaseSolver):
         sm_contribs_list = []
         self.stress_contribution_groups.to_csv(self.model_ws / "stress_contribution_groups.csv")
         copy_file(self.model_ws / "stress_contribution_groups.csv", self.temp_ws)
-        for fp in Path(self.model_ws).glob("simulation_stress_contributions_*.csv"):
+        for fp in Path(self.model_ws).glob("sim_stress_contribs_*.csv"):
             fp.unlink(missing_ok=True)
         for ml_name, ml in self.models.items():
             # get all stress contributions for each model at a minimum.
@@ -358,7 +358,7 @@ class PestSolver(BaseSolver):
                 var_name="column_names",
                 value_name="Observations",
             ).set_index(["column_names","date"])
-            contribs_file = Path(self.model_ws / f"simulation_stress_contributions_{ml_name}.csv")
+            contribs_file = Path(self.model_ws / f"sim_stress_contribs_{ml_name}.csv")
             contribs_all.to_csv(contribs_file, date_format="%d/%m/%Y")
             copy_file(contribs_file, self.temp_ws)
             contribs_all.loc[:, "model_name"] = ml_name
@@ -670,6 +670,7 @@ class PestSolver(BaseSolver):
                 )
 
         # observations
+        done_stress_contrib_files = []
         for ml_name, ml in self.models.items():
             # usual pastas head obs
             obsgp = f"head_{ml_name}"
@@ -716,11 +717,14 @@ class PestSolver(BaseSolver):
             )
 
             # stress contributions
-            if self.save_stress_contributions:
+            mod_file = f"sim_stress_contribs_{ml_name}.csv"
+            if self.save_stress_contributions and (mod_file not in done_stress_contrib_files):
                 for sm_name, istress_groups in self.stress_contribution_groups.xs(ml_name, level=0).groupby(level=0):
+                    if (mod_file in done_stress_contrib_files):
+                        break
                     obsgp = f"stress_contrib_{ml_name}"
                     self.pf.add_observations(
-                        f"simulation_stress_contributions_{ml_name}.csv",
+                        mod_file,
                         index_cols=["column_names","date"],
                         use_cols=["Observations"],
                         obsgp=obsgp,
@@ -732,6 +736,7 @@ class PestSolver(BaseSolver):
                         date_format="%d/%m/%Y",
                         rsplit_column_name=False,
                     )
+                    done_stress_contrib_files.append(mod_file)
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:

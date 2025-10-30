@@ -8,7 +8,7 @@ def run() -> None:
 
     from dill import load as dill_load  # pickle
     from gzip import open as gz_open
-    from pandas import read_csv, concat, date_range
+    from pandas import read_csv, concat, date_range, DataFrame
     from pandas.tseries.offsets import MonthEnd
     from pastas.io.base import load as load_model
 
@@ -43,7 +43,7 @@ def run() -> None:
     for sm_p in stressmodel_parameterisers:
         # update stress TimeSeries
         for ml in models:
-            sm_snames = {sm_name: ml.stressmodels.get(sm_name).get_stress(squeeze=False).columns for sm_name in ml.stressmodels}
+            sm_snames = {sm_name: DataFrame(ml.stressmodels.get(sm_name).get_stress(squeeze=False)).columns for sm_name in ml.stressmodels}
             for sm_name, snames in sm_snames.items():
                 smodel = ml.stressmodels.get(sm_name)
                 do_update = (ml.name in sm_p.model_names) & (sm_name in sm_p.stressmodel_names) & (smodel is not None)
@@ -121,7 +121,7 @@ def run() -> None:
                 var_name="column_names",
                 value_name="Observations",
             ).set_index(["column_names","date"])
-            contribs_all.to_csv(fpath / f"simulation_stress_contributions_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
+            contribs_all.to_csv(fpath / f"sim_stress_contribs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
@@ -191,7 +191,7 @@ def run_pypestworker(
                     ml.set_parameter(pname[len(ml_code):], optimal=val)
             # update stress TimeSeries
             for sm_p in stressmodel_parameterisers:
-                sm_snames = {sm_name: ml.stressmodels.get(sm_name).get_stress(squeeze=False).columns for sm_name in ml.stressmodels}
+                sm_snames = {sm_name: DataFrame(ml.stressmodels.get(sm_name).get_stress(squeeze=False)).columns for sm_name in ml.stressmodels}
                 for sm_name, snames in sm_snames.items():
                     smodel = ml.stressmodels.get(sm_name)
                     do_update = (ml.name in sm_p.model_names) & (sm_name in sm_p.stressmodel_names) & (smodel is not None)
