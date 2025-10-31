@@ -20,8 +20,12 @@ from pastas.solver import BaseSolver
 from pastas.typing import TimestampType
 from psutil import cpu_count
 from scipy.stats import norm, truncnorm
+from scipy.spatial import distance_matrix
 
 from pastas_plugins.pest.forward_run import run, run_pypestworker
+from pypestutils.pestutilslib import PestUtilsLib
+
+pputils = PestUtilsLib()  # the constructor searches for the shared lib
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +55,7 @@ class PestSolver(BaseSolver):
         save_stress_contributions: Optional[bool] = False,
         stress_contribution_groups: Optional[DataFrame | None] = None,
         phi_factors: Optional[dict] = {},
-        covary_multimodels_constant_d: bool = True,
+        multimodel_pastas_prior_pcov_info: Series | None = None,
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -110,19 +114,22 @@ class PestSolver(BaseSolver):
             Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
             via weighting the prior. Default is an empty dict (no phi factors applied in pest). NOTE: This is
             not yet supported for GLM/HP - only IES.
+        multimodel_pastas_prior_pcov_info : Optional[Series | None]
+            Details to apply Pastas parameter covariance between models in solver.models.
+            Covariance calculated by distance, using model.oseries.metadata "x" and "y" coord keys.
+            Variance (along the diagonal) is as calculated internally for parameters regardless of this option
+            (via stdev of parbounds / 4, i.e.,  an assumed 95% CI) - except for constant_d (see next).
+            Series must have the following indices with corresponding values: constant_d_range (in units of your x/y
+            coords), constant_d_sill, other_pars_pp_neighbours, other_pars_pp_separation_multiple (the latter being used
+            with average point separation distance to define the variogram range; 2 might be a decent starting value).
+            This way, constant_d parameters are preferred to vary only by up to x metres over y distance for example
+            across your entire domain of pastas model locations. Default is None.
         **kwargs : dict
             Additional keyword arguments passed to the BaseSolver.
 
         Returns
         -------
         None
-        """
-        """ TODO (MAYBE) 
-        covary_multimodels_constant_d : bool, optional
-            Whether to apply Pastas constant_d parameter covariance between models in solver.models.
-            Covariance calculated by distance, using model.oseries.metadata "x" and "y" coord keys.
-            Variance (along the diagonal) is as calculated internally for parameters regardless of this option
-            (via stdev of parbounds / 4, i.e.,  an assumed 95% CI).
         """
         def __getstate__(self):
             # Exclude the logger and its handlers from the state to be pickled
@@ -177,8 +184,10 @@ class PestSolver(BaseSolver):
         if self.save_stress_contributions:
             self.stress_contribution_groups = stress_contribution_groups
         self.phi_factors: dict = phi_factors
-        # TODO MAYBE self.covary_multimodels_constant_d: bool = covary_multimodels_constant_d
-
+        self.multimodel_pastas_prior_pcov_info: Series = multimodel_pastas_prior_pcov_info
+        if self.multimodel_pastas_prior_pcov_info is not None:
+            logger.warning("multimodel_pastas_prior_pcov_info provided; user beware that model.oseries.metadata['x'] "
+                           "and model.oseries.metadata['y'] must be provided for all Pastas models")
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
         self.pcovs = {}  # dict of pcovs {model.name: pcov} for each model to be solved by pest simultaneously
@@ -603,6 +612,84 @@ class PestSolver(BaseSolver):
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.observations.loc[omask].set_index("obsnme").weight
         tmp_obs = None
 
+    def _get_multimodel_pcov(
+            self,
+            pst,
+            pastas_ml_pars,
+    ) -> pyemu.Cov:
+        """Builds a spatial covariance matrix between each pastas parameter across all models, by distance"""
+        # get xy coords of each model and calc a separation distance matrix
+        coordinates = np.array([
+            [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
+            for ml_name,ml in self.models.items()
+        ])
+        dist_matrix = pd.DataFrame(
+            data=distance_matrix(coordinates, coordinates, p=2),
+            index=list(self.models.keys()),
+            columns=list(self.models.keys()),
+        )
+        # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
+        n_neighbours = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"]
+        sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
+        models_vario_range = pd.Series(
+            index=list(self.models.keys()),
+            data=[dist_matrix.loc[:, ml_name].drop(ml_name).sort_values().iloc[:n_neighbours].mean() * sep_dist_mult
+                  for ml_name in self.models.keys()
+                  ],
+        )
+        # use pst.parameter_data to assign range (from models_vario_range) and variance (from parbounds) per model name
+        par_df = pst.parameter_data.loc[pastas_ml_pars].copy()
+        par_df["pastas_parnme"] = par_df.index.to_series().apply(lambda x: x.split("_parnames:")[-1])
+        par_df["ml_code"] = par_df.pastas_parnme.str[:len(list(self.models.values())[0].oseries.metadata["ml_code"])] # all should be the same len
+        par_df["ml_iloc_idx"] = par_df.ml_code.str[1:].astype(int)
+        par_df["ml_name"] = [list(self.models.keys())[ml_idx] for ml_idx in par_df.ml_iloc_idx.values]
+        par_df.loc[:, "ps_vario_range"] = models_vario_range.loc[par_df.ml_name.values].values # needs to be updated for constant_d
+        log_mask = par_df.partrans == "log"
+        par_df.loc[log_mask, "ps_vario_sill"] = (np.log10(par_df.loc[log_mask].parubnd.values) -
+                                                 np.log10(par_df.loc[log_mask].parlbnd).values) / 4.0
+        par_df.loc[~log_mask, "ps_vario_sill"] = (par_df.loc[~log_mask].parubnd - par_df.loc[~log_mask].parlbnd) / 4.0
+        # update constant_d range and sill specifically
+        constant_d_mask = par_df.index.to_series().str.contains('constant_d', case=False, na=False)
+        par_df.loc[constant_d_mask, "ps_vario_range"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_range"]
+        par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
+        # assign xy coords to par_df
+        ml_xy = pd.DataFrame(
+            index=pd.Index(list(self.models.values()), name="ml_name"),
+            data={
+                "x": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()],
+                "y": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()]
+            }
+        )
+        par_df.loc[:, ["x","y"]] = ml_xy.loc[par_df.ml_name, ["x","y"]].values
+
+        # build covmat
+        covs, names_list = [], []
+        for ppar in ["_b", "_g", "_a", "constant_d"]:
+            mask = par_df.index.to_series().str.endswith(ppar)
+            par_df2 = par_df.loc[mask]
+            covs.append(
+                pputils.build_covar_matrix_2d(
+                    ec=par_df2.x.values,
+                    nc=par_df2.y.values,
+                    zn=1,
+                    vartype=1,
+                    nugget=0.0,
+                    aa=par_df2.ps_vario_range.values,
+                    sill=par_df2.ps_vario_sill.values,
+                    anis=1.0,
+                    bearing=0.0,
+                    ldcovmat=par_df2.shape[0]
+                )
+            )
+            names_list.append(par_df2.index.to_list())
+        parcovs = [
+            pyemu.Cov(x=cov, names=names, isdiagonal=False).df()
+            for cov, names in zip(covs, names_list)
+        ]
+        parcov = pyemu.Cov.from_dataframe(pd.concat(parcovs).fillna(0.0)) # we only covary the same parameter between models (not across parameter types)
+
+        return parcov
+
     def setup_files(self, version: int = 2):
         """Setup PEST file structure for optimization
 
@@ -876,27 +963,40 @@ class PestSolver(BaseSolver):
                         include_path=False,
                     )
             else:
-                pastas_parcov = pyemu.Cov.from_parameter_data(
-                    pst,
-                    sigma_range=4.0,
-                    scale_offset=False,
-                    subset=pastas_ml_pars,  # .to_list(), pyemu doc says str, but has to be a Series/Index
-                )  # returns a diagonal matrix
-                # I think the wording in pyemu doc is wrong on scale_offset=True by default.
-                # Here, parval1 is already scaled and offset...why add those before doing cov calcs?
-                # definitely get log par errors. Maybe pyemu does the anti-scale/offset immediately
-                # before pst.write (scary!), whereas here we have already done that.
-                # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.
-                unc_str = self._get_uncfile_str(
-                    pastas_parcov
-                )  # default args are for diagonals
+                if self.multimodel_pastas_prior_pcov_info is not None:
+                    pastas_parcov = self._get_multimodel_pcov(pst, pastas_ml_pars)
+                    covmat_fname = str(
+                        self.temp_ws / f"pest.prior.pastas_parcov.jcb"
+                    )
+                    pastas_parcov.to_binary(covmat_fname)
+                    unc_str = self._get_uncfile_str(
+                        pastas_parcov,
+                        covmat_file=covmat_fname,
+                        var_mult=1.0,
+                        include_path=False,
+                    )
+                else:
+                    pastas_parcov = pyemu.Cov.from_parameter_data(
+                        pst,
+                        sigma_range=4.0,
+                        scale_offset=False,
+                        subset=pastas_ml_pars,  # .to_list(), pyemu doc says str, but has to be a Series/Index
+                    )  # returns a diagonal matrix
+                    # I think the wording in pyemu doc is wrong on scale_offset=True by default.
+                    # Here, parval1 is already scaled and offset...why add those before doing cov calcs?
+                    # definitely get log par errors. Maybe pyemu does the anti-scale/offset immediately
+                    # before pst.write (scary!), whereas here we have already done that.
+                    # I don't think it does though, as i always get par transform errors if I do not anti-scale/offset myself before pst.write.
+                    unc_str = self._get_uncfile_str(
+                        pastas_parcov
+                    )  # default args are for diagonals
             pastas_parcov = None
             if self.stressmodel_parameterisers:
-                covmat_fname = str(
-                    self.temp_ws / f"pest.prior.{sm_p.parameteriser_name}.jcb"
-                )
-                sm_p.stress_parcov.to_binary(covmat_fname)
                 for sm_p in self.stressmodel_parameterisers:
+                    covmat_fname = str(
+                        self.temp_ws / f"pest.prior.{sm_p.parameteriser_name}.jcb"
+                    )
+                    sm_p.stress_parcov.to_binary(covmat_fname)
                     unc_str += self._get_uncfile_str(
                         sm_p.stress_parcov,
                         covmat_file=covmat_fname,
