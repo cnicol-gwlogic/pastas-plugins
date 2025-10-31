@@ -56,6 +56,11 @@ class Parameteriser:
         Must be None or one of the following: (D, h, m, s, ms, us, ns) or a multiple of that e.g. "7D".
         If None, a single (constant-in-time) stress rate parameter is defined for all stresses in stress_names.
         Default is None.
+    par_freq_max : Optional[str | None]
+        if par_freq is provided as 'at_rate_changes', a maximum spacing (frequency) between temporal pilot points is
+        forced with this python frequency string variable. So for example if 'at_rate_changes' results in durations
+        between adjacent pilot points of > par_freq_max (which is internally converted to days freq interval duration),
+        additional pilot points are added to maintain that maximum parameter frequency. Default is None.
     t_variogram_range_freq_factor: float, optional
         par_freq factor to define temporal variogram range to build a parameter covariance matrix for input to
         pyemu.helpers.first_order_pearson_tikhonov(). Default is 2.0, so for example if par_freq is 365D, this means
@@ -127,6 +132,7 @@ class Parameteriser:
         date_format: Optional[str] = "%d/%m/%Y",
         interp_kwargs: Optional[dict[str, Any]] = {},
         par_freq: str | None = None,
+        par_freq_max: Optional[str | None] = None,
         t_variogram_range_freq_factor: float | None = None,
         max_vario_range: Optional[float] = 730.0,
         t_variogram_sill: float = 1.0,
@@ -159,6 +165,10 @@ class Parameteriser:
                 self.par_freq = _frequency_is_supported(par_freq)
         else:
             self.par_freq = None
+        if self.par_freq_max:
+            self.par_freq_max = _frequency_is_supported(par_freq_max)
+        else:
+            self.par_freq_max = par_freq_max
         self.t_variogram_range_freq_factor = t_variogram_range_freq_factor
         self.t_variogram_sill = t_variogram_sill
         self.max_vario_range = max_vario_range
@@ -597,6 +607,41 @@ class Parameteriser:
 
         return modobs
 
+    def _force_stress_par_freq_max(
+            self,
+            source_points: DataFrame,
+    ) -> DataFrame:
+        """insert additional stress par pilot points to maintain a maximum duration time interval"""
+        max_ndays = pd.to_timedelta(self.par_freq_max).total_seconds() / 86400.0
+
+        def get_base_points(source_points):
+            base_points = source_points.loc[
+                source_points.intervals > max_ndays,
+                ["intervals", "column_names", "Datetime"]
+            ].copy()
+            return base_points
+
+        base_points = get_base_points(source_points)
+        while base_points.intervals.max() > max_ndays:
+            new_points = base_points.loc[(base_points.intervals > max_ndays)].copy()
+            new_points.loc[:, "intervals"] /= 2.0
+            new_points.loc[:, "Datetime"] -= pd.to_timedelta(arg=new_points.intervals * 86400.0, unit='s')
+            new_points.loc[:, "x"] = new_points.Datetime.sub(source_points.Datetime.min()).dt.total_seconds() / 86400.0
+            new_points["infill_point"] = True
+            source_points = pd.concat([source_points, new_points], axis=0, ignore_index=True)
+            source_points = source_points.sort_values(by=["column_names", "Datetime"])
+            source_points = source_points.ffill()
+            source_points.loc[:, "intervals"] = (
+                source_points[["x", "column_names"]]
+                .groupby(by="column_names")
+                .transform("diff")
+                .fillna(0.0)
+                .x
+            )
+            base_points = get_base_points(source_points)
+
+        return source_points
+
     def _get_stress_pars(self, solver: PestSolver, par_name_base: str) -> DataFrame:
         """Build interpolation source points for None, "par_freq" and "at_rate_changes" methods"""
         if self.par_freq == "at_rate_changes":
@@ -638,6 +683,10 @@ class Parameteriser:
                 .fillna(0.0)
                 .x
             )
+            # insert additional pilot points to maintain a maximum duration interval
+            if self.par_freq_max is not None:
+                source_points = self._force_stress_par_freq_max(source_points)
+
             source_points.loc[:, "median_intervals"] = (
                 source_points[["intervals", "column_names"]]
                 .groupby(by="column_names")
