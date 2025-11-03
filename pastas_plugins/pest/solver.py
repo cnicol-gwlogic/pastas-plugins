@@ -629,7 +629,7 @@ class PestSolver(BaseSolver):
             columns=list(self.models.keys()),
         )
         # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
-        n_neighbours = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"]
+        n_neighbours = int(self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"])
         sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
         models_vario_range = pd.Series(
             index=list(self.models.keys()),
@@ -643,6 +643,11 @@ class PestSolver(BaseSolver):
         par_df["ml_code"] = par_df.pastas_parnme.str[:len(list(self.models.values())[0].oseries.metadata["ml_code"])] # all should be the same len
         par_df["ml_iloc_idx"] = par_df.ml_code.str[1:].astype(int)
         par_df["ml_name"] = [list(self.models.keys())[ml_idx] for ml_idx in par_df.ml_iloc_idx.values]
+        par_df["ml_name_lower"] = par_df["ml_name"].str.lower()
+        par_df["common_name"] = par_df.apply(
+            lambda row: row['pastas_parnme'].replace(f"{row.ml_name_lower}_", "").replace(f"{row.parnames}_", ""),
+            axis=1
+        )
         par_df.loc[:, "ps_vario_range"] = models_vario_range.loc[par_df.ml_name.values].values # needs to be updated for constant_d
         log_mask = par_df.partrans == "log"
         par_df.loc[log_mask, "ps_vario_sill"] = (np.log10(par_df.loc[log_mask].parubnd.values) -
@@ -654,7 +659,7 @@ class PestSolver(BaseSolver):
         par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
         # assign xy coords to par_df
         ml_xy = pd.DataFrame(
-            index=pd.Index(list(self.models.values()), name="ml_name"),
+            index=pd.Index(list(self.models.keys()), name="ml_name"),
             data={
                 "x": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()],
                 "y": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()]
@@ -664,9 +669,7 @@ class PestSolver(BaseSolver):
 
         # build covmat
         covs, names_list = [], []
-        for ppar in ["_b", "_g", "_a", "constant_d"]:
-            mask = par_df.index.to_series().str.endswith(ppar)
-            par_df2 = par_df.loc[mask]
+        for common_name, par_df2 in par_df.groupby(by="common_name"):
             covs.append(
                 pputils.build_covar_matrix_2d(
                     ec=par_df2.x.values,
@@ -883,7 +886,7 @@ class PestSolver(BaseSolver):
                     sm_p.stress_pars.loc[:,["parval1","partrans","parlbnd","parubnd"]]
                 )
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
-                    ["column_names", "index_org"]
+                    ["column_names", "Datetime"]
                 )
 
         # Tie duplicate wellmodel pars to other wellmodels' pars.

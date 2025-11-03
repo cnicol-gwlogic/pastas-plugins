@@ -165,7 +165,7 @@ class Parameteriser:
                 self.par_freq = _frequency_is_supported(par_freq)
         else:
             self.par_freq = None
-        if self.par_freq_max:
+        if par_freq_max:
             self.par_freq_max = _frequency_is_supported(par_freq_max)
         else:
             self.par_freq_max = par_freq_max
@@ -179,7 +179,6 @@ class Parameteriser:
         self.krig_mpts = None
         self.stress_pars = None
         self.stress_parcov = None
-        self._parnme_indexer = None
 
     @staticmethod
     def _source_pts_minmax_range(source_points: DataFrame) -> float:
@@ -403,39 +402,27 @@ class Parameteriser:
         """
         return dtindex.to_series().sub(dtindex.min()).dt.total_seconds() / 86400.0
 
-    @property
-    def parnme_indexer(self) -> DataFrame:
-        """
-        Returns DataFrame indexed by PEST (pyemu.PstFrom) parnme, with columns of:
-        -usecol (column name from original model file df that is being parameterised); and
-        -indices (index from original model file df that is being parameterised).
-        """
-        return self._parnme_indexer
-
     def _build_parnme_indexer(self) -> None:
-        usecols = (
-            self.source_points.column_names
-        )  # should be in same order as stress_pars
-        indices = self.stress_pars.parnme.apply(
+        cols = self.source_points.column_names.unique()
+        cname_lower2cname = Series(index=[c.lower() for c in cols], data=cols, name="column_names")
+        index_base = self.stress_pars.parnme.apply(
             lambda s: s.split("_pstyle:d_datetime:")[-1]
         )
-        indices = pd.to_datetime(
-            indices.apply(lambda s: s.split("_column_names:")[0]),
+        cnames = index_base.apply(lambda s: s.split("_column_names:")[-1])
+        dts = pd.to_datetime(
+            index_base.apply(lambda s: s.split("_column_names:")[0]),
             format="%d/%m/%Y",
-        ).rename("indices")
-        parnme_indexer = (
-            usecols.reset_index(drop=False)
-            .set_index(indices.index)
-            .rename(columns={"Datetime": "indices"})
         )
-        if (parnme_indexer.indices != indices.values).any():
-            logger.error("parnmes and source_points are misaligned. Something's up.")
-            raise Exception
-        self._parnme_indexer = parnme_indexer
-        self.stress_pars["column_names"] = parnme_indexer.column_names
-        self.stress_pars["index_org"] = parnme_indexer.indices
+        self.stress_pars["Datetime"] = dts.values
+        self.stress_pars["column_names_lower"] = cnames.str.lower()
+        self.stress_pars = self.stress_pars.merge(
+            cname_lower2cname,
+            left_on="column_names_lower",
+            right_index=True,
+            how="left"
+        )
 
-        for var in [usecols, indices, parnme_indexer]:
+        for var in [cname_lower2cname, index_base, cnames, dts]:
             var = None
 
     def interpolate_stresses(
@@ -613,21 +600,38 @@ class Parameteriser:
     ) -> DataFrame:
         """insert additional stress par pilot points to maintain a maximum duration time interval"""
         max_ndays = pd.to_timedelta(self.par_freq_max).total_seconds() / 86400.0
+        source_points = source_points.reset_index(drop=False).copy()
 
         def get_base_points(source_points):
             base_points = source_points.loc[
                 source_points.intervals > max_ndays,
-                ["intervals", "column_names", "Datetime"]
+                : #["intervals", "column_names", "Datetime"]
             ].copy()
             return base_points
 
         base_points = get_base_points(source_points)
         while base_points.intervals.max() > max_ndays:
-            new_points = base_points.loc[(base_points.intervals > max_ndays)].copy()
+            new_points = get_base_points(base_points)
             new_points.loc[:, "intervals"] /= 2.0
             new_points.loc[:, "Datetime"] -= pd.to_timedelta(arg=new_points.intervals * 86400.0, unit='s')
+            new_points.loc[:, "Datetime"] = new_points.loc[:, "Datetime"].dt.normalize() # normalise strips h:m:s (sets dt to midnight)
             new_points.loc[:, "x"] = new_points.Datetime.sub(source_points.Datetime.min()).dt.total_seconds() / 86400.0
             new_points["infill_point"] = True
+
+            # force these to be aligned with self.stress.index freq - assign to nearest
+            # (implied in this is that model.freq is <= self.par_freq_max - this class will implode if that's not the case) (yes, should trap for it)
+            new_points.sort_values(by="Datetime", inplace=True)
+            new_points.loc[:, "dtnew"] = pd.merge_asof(
+                new_points.loc[:, ["Datetime"]],
+                self.stress.index.to_frame().rename(columns={"Datetime": "dtnew"}),
+                left_on="Datetime",
+                right_on="dtnew",
+                direction="nearest",
+            ).dtnew.values
+            new_points.loc[:, "Datetime"] = new_points.loc[:, "dtnew"]
+            #recalc totim (intervals recalc'd below)
+            new_points.loc[:, "x"] = new_points.Datetime.sub(source_points.Datetime.min()).dt.total_seconds() / 86400.0
+
             source_points = pd.concat([source_points, new_points], axis=0, ignore_index=True)
             source_points = source_points.sort_values(by=["column_names", "Datetime"])
             source_points = source_points.ffill()
@@ -639,7 +643,7 @@ class Parameteriser:
                 .x
             )
             base_points = get_base_points(source_points)
-
+        source_points = source_points.set_index("Datetime")
         return source_points
 
     def _get_stress_pars(self, solver: PestSolver, par_name_base: str) -> DataFrame:
@@ -683,6 +687,7 @@ class Parameteriser:
                 .fillna(0.0)
                 .x
             )
+
             # insert additional pilot points to maintain a maximum duration interval
             if self.par_freq_max is not None:
                 source_points = self._force_stress_par_freq_max(source_points)
@@ -740,6 +745,8 @@ class Parameteriser:
             .reset_index(drop=False)
             .set_index(["column_names", "Datetime"])["value"]
         )
+        if self.par_freq_max is not None:
+            source_points.loc[:, "value"] = source_points.value.ffill()
         source_points = source_points.reset_index(drop=False).set_index("Datetime")
 
         # convert stress datetime to timedelta from t0 as float(totaldays) for kriging
@@ -816,11 +823,11 @@ class Parameteriser:
         self.source_points = self._get_stress_pars(solver, par_name_base)
 
         # build index between pest parnames from self.stress_pars and self.modelfile parameterised columns and indices.
-        self._build_parnme_indexer()  # now self.parnme_indexer is gettable. Also adds a usecol field to the self.stress_pars df (and "index_org" - the original index values from stress df)
+        self._build_parnme_indexer()
 
         # assign parnme to source_points; make all df indices a mux: (stressmodelname,datetime)
         self.stress_pars = self.stress_pars.reset_index(drop=False).set_index(
-            ["column_names", "index_org"]
+            ["column_names", "Datetime"]
         )
         self.source_points = self.source_points.reset_index(drop=False).set_index(
             ["column_names", "Datetime"]
