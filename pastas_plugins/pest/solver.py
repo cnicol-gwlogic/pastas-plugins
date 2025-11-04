@@ -104,9 +104,9 @@ class PestSolver(BaseSolver):
         save_stress_contributions : bool, optional
             Whether to save stressmodel contributions to pest obs_data file (zero-weighted).
         stress_contribution_groups: DataFrame, optional
-            Series multi-indexed by: [Pastas model name, stressmodel name, label string].
+            Series multi-indexed by: [Pastas model name, label string].
             Columns ("istress_names", "save_all") contain stress names for which stress contributions are summed
-            for each model/stressmodel/label key.
+            for each model/label key.
             Column "save_all" is a flag for each model - for each model (index 0 model name set),
             if any of these are True, then all stress contributions are saved for this model
              (which can be big), not just the identified istress_names/groups. Default is None.
@@ -203,13 +203,13 @@ class PestSolver(BaseSolver):
             self, stress_contribution_groups
     ) -> None:
         if stress_contribution_groups is not None:
-            self._stress_contribution_groups = stress_contribution_groups.sort_index(level=[0, 1, 2])
+            self._stress_contribution_groups = stress_contribution_groups.sort_index(level=[0, 1])
             self._stress_contribution_groups.index = self._stress_contribution_groups.index.set_levels(
-                self._stress_contribution_groups.index.levels[2].str.replace(" ", ""),
-                level=2
+                self._stress_contribution_groups.index.levels[1].str.replace(" ", ""),
+                level=1
             ) # we need spaces removed because pyemu will do this too,
             #   and we need to be able to link between pyemu names and these user-provided labels
-            self._stress_contribution_groups.index.names = ['ml_name', 'sm_name','label']
+            self._stress_contribution_groups.index.names = ['ml_name', 'label']
             if not set(["istress_names","save_all"]).issubset(set(self._stress_contribution_groups.columns)):
                 raise Exception(f"stress_contribution_groups must contain columns: ['istress_names','save_all']\n" +
                                 "but it contains only {stress_contribution_groups.columns}")
@@ -347,17 +347,14 @@ class PestSolver(BaseSolver):
             contribs_all = [PestSolver._get_monthend_interpolant(ml, s) for s in contribs_all]  # reindex to monthend via time interp. Should make this an option...
             contribs_all = pd.concat(contribs_all, axis=1, ignore_index=False)
             # if stress_contribution_groups are user-provided, sum those stress contributions up too.
-            ml_stress_groups = self.stress_contribution_groups.xs(ml_name)
-            for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
-                istress_groups = ml_stress_groups.xs(sm_name)
-                for label, istress_names in istress_groups.groupby(level=0):
-                    names = istress_groups.xs(label)[["istress_names"]].values.flatten()
-                    # aggregate selected groups of istress contributions
-                    contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            for label, istress_names in self.stress_contribution_groups.loc[(ml_name, slice(None)), :].groupby(level=1):
+                names = istress_names.istress_names.values.flatten()
+                # aggregate selected groups of istress contributions
+                contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
             # drop unspecific istress_names / labels from the df
             if (self.stress_contribution_groups.xs(ml_name).save_all == False).any():
                 contribs_all = contribs_all.loc[:,
-                contribs_all.columns.isin(ml_stress_groups.index.get_level_values("label"))
+                contribs_all.columns.isin(self.stress_contribution_groups.xs(ml_name).index.get_level_values("label"))
                 ]
             # melt from xtab to flat array and save
             contribs_all.index.name = "date"

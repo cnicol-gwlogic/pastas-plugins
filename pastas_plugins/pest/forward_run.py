@@ -24,7 +24,7 @@ def run() -> None:
     save_stress_contributions = False
     if Path("stress_contribution_groups.csv").exists():
         save_stress_contributions = True
-        stress_contribution_groups = read_csv("stress_contribution_groups.csv", index_col=[0,1,2])
+        stress_contribution_groups = read_csv("stress_contribution_groups.csv", index_col=[0,1])
 
     # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
@@ -102,17 +102,14 @@ def run() -> None:
             contribs_all = ml.get_contributions(split=True) # all contributions
             contribs_all = [_get_monthend_interpolant(ml, s) for s in contribs_all] # downsample from daily. Should make this an option...
             contribs_all = concat(contribs_all, axis=1, ignore_index=False)
-            ml_stress_groups = stress_contribution_groups.xs(ml_name)
-            for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
-                istress_groups = ml_stress_groups.xs(sm_name)
-                for label, istress_names in istress_groups.groupby(level=0):
-                    names = istress_groups.xs(label)[["istress_names"]].values.flatten()
-                    # aggregate selected groups of istress contributions
-                    contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
+            for label, istress_names in stress_contribution_groups.loc[(ml_name, slice(None)), :].groupby(level=1):
+                names = istress_names.istress_names.values.flatten()
+                # aggregate selected groups of istress contributions
+                contribs_all.loc[:,label] = contribs_all.loc[:, names].sum(axis=1)
             # drop unspecific istress_names / labels from the df
             if (stress_contribution_groups.xs(ml_name).save_all == False).any():
                 contribs_all = contribs_all.loc[:,
-                contribs_all.columns.isin(ml_stress_groups.index.get_level_values("label"))
+                contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.get_level_values("label"))
                 ]
             contribs_all.index.name = "date"
             contribs_all = contribs_all.reset_index(drop=False).melt(
@@ -268,17 +265,14 @@ def run_pypestworker(
                 contribs_all = ml.get_contributions(split=True)  # all contributions
                 contribs_all = [_get_monthend_interpolant(ml, s) for s in contribs_all]  # reindex to monthend via time interp. Should make this an option...
                 contribs_all = concat(contribs_all, axis=1, ignore_index=False)
-                ml_stress_groups = stress_contribution_groups.xs(ml_name)
-                for sm_name, istress_groups in ml_stress_groups.groupby(level="sm_name"):
-                    istress_groups = ml_stress_groups.xs(sm_name)
-                    for label, istress_names in istress_groups.groupby(level=0):
-                        names = istress_groups.xs(label)[["istress_names"]].values.flatten()
-                        # aggregate selected groups of istress contributions
-                        contribs_all.loc[:, label] = contribs_all.loc[:, names].sum(axis=1)
+                for label, istress_names in stress_contribution_groups.loc[(ml_name, slice(None)), :].groupby(level=1):
+                    names = istress_names.istress_names.values.flatten()
+                    # aggregate selected groups of istress contributions
+                    contribs_all.loc[:, label] = contribs_all.loc[:, names].sum(axis=1)
                 # drop unspecific istress_names / labels from the df
                 if (stress_contribution_groups.xs(ml_name).save_all == False).any():
                     contribs_all = contribs_all.loc[:,
-                    contribs_all.columns.isin(ml_stress_groups.index.get_level_values("label"))
+                    contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.get_level_values("label"))
                     ]
                 # melt from xtab to flat array and save
                 contribs_all.index.name = "date"
