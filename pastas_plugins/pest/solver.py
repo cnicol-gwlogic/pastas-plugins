@@ -1,4 +1,4 @@
-import json, shutil
+import json, re
 import logging
 from collections.abc import Callable
 from copy import deepcopy
@@ -116,7 +116,8 @@ class PestSolver(BaseSolver):
             not yet supported for GLM/HP - only IES.
         multimodel_pastas_prior_pcov_info : Optional[Series | None]
             Details to apply Pastas parameter covariance between models in solver.models.
-            Covariance calculated by distance, using model.oseries.metadata "x" and "y" coord keys.
+            Covariance calculated by distance, using model.oseries.metadata "x" and "y" coord keys,
+            along with stressmodel.stress.metadata (the mid point between the two is used as the covariance location).
             Variance (along the diagonal) is as calculated internally for parameters regardless of this option
             (via stdev of parbounds / 4, i.e.,  an assumed 95% CI) - except for constant_d (see next).
             Series must have the following indices with corresponding values: constant_d_range (in units of your x/y
@@ -615,25 +616,67 @@ class PestSolver(BaseSolver):
             pastas_ml_pars,
     ) -> pyemu.Cov:
         """Builds a spatial covariance matrix between each pastas parameter across all models, by distance"""
-        # get xy coords of each model and calc a separation distance matrix
-        coordinates = np.array([
-            [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
-            for ml_name,ml in self.models.items()
-        ])
-        dist_matrix = pd.DataFrame(
-            data=distance_matrix(coordinates, coordinates, p=2),
-            index=list(self.models.keys()),
-            columns=list(self.models.keys()),
-        )
-        # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
-        n_neighbours = int(self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"])
-        sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
-        models_vario_range = pd.Series(
-            index=list(self.models.keys()),
-            data=[dist_matrix.loc[:, ml_name].drop(ml_name).sort_values().iloc[:n_neighbours].mean() * sep_dist_mult
-                  for ml_name in self.models.keys()
-                  ],
-        )
+
+        def _get_models_vario_range():
+            """get xy coords of each model and calc a separation distance matrix. Calc a separation distance matrix,
+            find n nearest neighbout and get avg sep dist."""
+            coordinates = np.array([
+                [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
+                for ml_name,ml in self.models.items()
+            ])
+            ml_xy = pd.DataFrame(index=self.models.keys(), columns=["x", "y"], data=coordinates)
+            dist_matrix = pd.DataFrame(
+                data=distance_matrix(coordinates, coordinates, p=2),
+                index=list(self.models.keys()),
+                columns=list(self.models.keys()),
+            )
+            # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
+            n_neighbours = int(self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"])
+            sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
+            models_vario_range = pd.Series(
+                index=list(self.models.keys()),
+                data=[dist_matrix.loc[:, ml_name].drop(ml_name).sort_values().iloc[:n_neighbours].mean() * sep_dist_mult
+                      for ml_name in self.models.keys()
+                      ],
+            )
+
+            return models_vario_range, ml_xy
+
+        def _get_model_smodel_vario_range():
+            """get xy coords of mid point between each model and its stresses. Calc a separation distance matrix,
+            find n nearest neighbout and get avg sep dist.
+            """
+            mod_coords, mod2stress_names = [],[]
+            mod2stress_xy = pd.DataFrame()
+            for ml_name, ml in self.models.items():
+                for sm_name in ml.get_stressmodel_names():
+                    mod_coords.append(
+                        [((ml.oseries.metadata["x"] + ml.stressmodels[sm_name].stress[0].metadata["x"]) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6),
+                         ((ml.oseries.metadata["y"] + ml.stressmodels[sm_name].stress[0].metadata["y"]) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6)
+                         ]
+                    ) # random small decimals added because we can have reciprocal model-->smodel connections, meaning we can't generate a pcov for those
+                    mod2stress_names.append(f"{ml_name}|{sm_name}")
+                    mod2stress_xy.loc[f"{ml_name}|{sm_name}", ["ml_name", "sm_name", "x","y"]] = [ml_name, sm_name, mod_coords[-1][0], mod_coords[-1][1]]
+            mod_coords = np.asarray(mod_coords)
+            dist_matrix = pd.DataFrame(
+                data=distance_matrix(mod_coords, mod_coords, p=2),
+                index=mod2stress_names,
+                columns=mod2stress_names,
+            )
+            # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
+            n_neighbours = int(self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"])
+            sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
+            models_stresses_vario_range = pd.Series(
+                index=mod2stress_names,
+                data=[dist_matrix.loc[:, mod2stress_name].drop(mod2stress_name).sort_values().iloc[:n_neighbours].mean() * sep_dist_mult
+                      for mod2stress_name in mod2stress_names
+                      ],
+            )
+            return models_stresses_vario_range, mod2stress_xy
+
+        models_vario_range, ml_xy = _get_models_vario_range()
+        models_stresses_vario_range, mod2stress_xy = _get_model_smodel_vario_range()
+
         # use pst.parameter_data to assign range (from models_vario_range) and variance (from parbounds) per model name
         par_df = pst.parameter_data.loc[pastas_ml_pars].copy()
         par_df["pastas_parnme"] = par_df.index.to_series().apply(lambda x: x.split("_parnames:")[-1])
@@ -644,29 +687,33 @@ class PestSolver(BaseSolver):
         par_df["common_name"] = par_df.apply(
             lambda row: row['pastas_parnme'].replace(f"{row.ml_name_lower}_", "").replace(f"{row.parnames}_", ""),
             axis=1
+        ) # eg pumping_historical_gab51_g. m00constant_d ends up at d
+        par_df["common_name2"] = par_df.index.to_series().str[-2:] # _d, _a, _b, _g etc.
+
+        sm_names_lower2sm_name = pd.Series(
+            index=pd.Index([s.lower() for s in mod2stress_xy.sm_name.unique()], name="sm_name_lower"),
+            data=[s for s in mod2stress_xy.sm_name.unique()], name="sm_name",
         )
-        par_df.loc[:, "ps_vario_range"] = models_vario_range.loc[par_df.ml_name.values].values # needs to be updated for constant_d
+        constant_d_mask = par_df.index.to_series().str.contains('constant_d', case=False, na=False)
+        par_df.loc[~constant_d_mask, "stressmodel_name"] = par_df.loc[~constant_d_mask, :].apply(
+            lambda x: sm_names_lower2sm_name.loc[re.sub(f"{x.ml_code}|{x.common_name2}$", "", x.pastas_parnme)], axis=1)
+        par_df.loc[~constant_d_mask, "mod2stress_names"] = par_df.loc[~constant_d_mask, ["ml_name","stressmodel_name"]].apply(lambda row: f"{row.ml_name}|{row.stressmodel_name}", axis=1)
+        par_df.loc[~constant_d_mask, "ps_vario_range"] = models_stresses_vario_range.loc[par_df.loc[~constant_d_mask, "mod2stress_names"].values].values
+        par_df.loc[~constant_d_mask, ["x", "y"]] = mod2stress_xy.loc[par_df.loc[~constant_d_mask].mod2stress_names.values, ["x", "y"]].values
+
         log_mask = par_df.partrans == "log"
         par_df.loc[log_mask, "ps_vario_sill"] = (np.log10(par_df.loc[log_mask].parubnd.values) -
                                                  np.log10(par_df.loc[log_mask].parlbnd).values) / 4.0
         par_df.loc[~log_mask, "ps_vario_sill"] = (par_df.loc[~log_mask].parubnd - par_df.loc[~log_mask].parlbnd) / 4.0
+
         # update constant_d range and sill specifically
-        constant_d_mask = par_df.index.to_series().str.contains('constant_d', case=False, na=False)
         par_df.loc[constant_d_mask, "ps_vario_range"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_range"]
         par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
-        # assign xy coords to par_df
-        ml_xy = pd.DataFrame(
-            index=pd.Index(list(self.models.keys()), name="ml_name"),
-            data={
-                "x": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()],
-                "y": [ml.oseries.metadata["x"] for ml_name, ml in self.models.items()]
-            }
-        )
-        par_df.loc[:, ["x","y"]] = ml_xy.loc[par_df.ml_name, ["x","y"]].values
+        par_df.loc[constant_d_mask, ["x","y"]] = ml_xy.loc[par_df.loc[constant_d_mask].ml_name, ["x","y"]].values
 
         # build covmat
         covs, names_list = [], []
-        for common_name, par_df2 in par_df.groupby(by="common_name"):
+        for common_name, par_df2 in par_df.groupby(by="common_name2"):
             covs.append(
                 pputils.build_covar_matrix_2d(
                     ec=par_df2.x.values,
