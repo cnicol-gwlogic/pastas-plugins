@@ -560,6 +560,8 @@ class PestSolver(BaseSolver):
                 lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1]}"
             ) # these are lower case because pest obsnme is (from which column_names is derived - above)
         omask = self.stress_obs.obs_type.isin(obs_types)
+        if "obsnme" in self.stress_obs.columns:
+            omask = omask & (self.stress_obs.obsnme.isna())
         if ml_name is not None:
             omask = omask & (self.stress_obs.model_name == ml_name)
         join_obs = self.stress_obs.loc[omask].copy()
@@ -581,7 +583,7 @@ class PestSolver(BaseSolver):
         ) # revert index column_names to og case
 
         self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.loc[:,["obsnme","obgnme"]]
-        self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].set_index("obsnme").weight
+        self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].dropna(subset="obsnme").set_index("obsnme").weight
 
     def _update_observations_names(
             self,
@@ -649,10 +651,12 @@ class PestSolver(BaseSolver):
             mod_coords, mod2stress_names = [],[]
             mod2stress_xy = pd.DataFrame()
             for ml_name, ml in self.models.items():
-                for sm_name in ml.get_stressmodel_names():
+                for sm_name, sm in ml.stressmodels.items():
+                    sm_xloc = np.mean([stress.metadata["x"] for stress in sm.stress])
+                    sm_yloc = np.mean([stress.metadata["y"] for stress in sm.stress])
                     mod_coords.append(
-                        [((ml.oseries.metadata["x"] + ml.stressmodels[sm_name].stress[0].metadata["x"]) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6),
-                         ((ml.oseries.metadata["y"] + ml.stressmodels[sm_name].stress[0].metadata["y"]) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6)
+                        [((ml.oseries.metadata["x"] + sm_xloc) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6),
+                         ((ml.oseries.metadata["y"] + sm_yloc) / 2.0) + np.random.uniform(1.0e-7, 1.0e-6)
                          ]
                     ) # random small decimals added because we can have reciprocal model-->smodel connections, meaning we can't generate a pcov for those
                     mod2stress_names.append(f"{ml_name}|{sm_name}")
@@ -696,7 +700,7 @@ class PestSolver(BaseSolver):
         )
         constant_d_mask = par_df.index.to_series().str.contains('constant_d', case=False, na=False)
         par_df.loc[~constant_d_mask, "stressmodel_name"] = par_df.loc[~constant_d_mask, :].apply(
-            lambda x: sm_names_lower2sm_name.loc[re.sub(f"{x.ml_code}|{x.common_name2}$", "", x.pastas_parnme)], axis=1)
+            lambda x: sm_names_lower2sm_name.loc[re.sub(f"^{x.ml_code}|{x.common_name2}$", "", x.pastas_parnme)], axis=1)
         par_df.loc[~constant_d_mask, "mod2stress_names"] = par_df.loc[~constant_d_mask, ["ml_name","stressmodel_name"]].apply(lambda row: f"{row.ml_name}|{row.stressmodel_name}", axis=1)
         par_df.loc[~constant_d_mask, "ps_vario_range"] = models_stresses_vario_range.loc[par_df.loc[~constant_d_mask, "mod2stress_names"].values].values
         par_df.loc[~constant_d_mask, ["x", "y"]] = mod2stress_xy.loc[par_df.loc[~constant_d_mask].mod2stress_names.values, ["x", "y"]].values
@@ -710,6 +714,8 @@ class PestSolver(BaseSolver):
         par_df.loc[constant_d_mask, "ps_vario_range"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_range"]
         par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
         par_df.loc[constant_d_mask, ["x","y"]] = ml_xy.loc[par_df.loc[constant_d_mask].ml_name, ["x","y"]].values
+
+        par_df.to_csv(self.temp_ws / f"pest.prior.parcovs.par_info.csv", date_format="%d/%m/%Y")
 
         # build covmat
         covs, names_list = [], []
