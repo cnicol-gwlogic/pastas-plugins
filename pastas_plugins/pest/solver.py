@@ -473,7 +473,7 @@ class PestSolver(BaseSolver):
             self.vary += self.vary_by_model[ml_name]
             parameters = ml.parameters[self.vary_by_model[ml_name]].copy()
             parameters.index = [
-                p.replace("_A", "_g") if p.endswith("_A") else p for p in parameters.index
+                re.sub("_A$", "_g", p) for p in parameters.index
             ]
             parameters.index.name = "parnames"
             if "constant_d" in parameters.index:
