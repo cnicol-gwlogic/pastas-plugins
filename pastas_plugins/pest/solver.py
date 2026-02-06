@@ -1,7 +1,6 @@
 import json, re
 import logging
 from collections.abc import Callable
-from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from platform import node as get_computername
@@ -12,6 +11,7 @@ import dill  # pickle
 import gzip
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 import pastas
 import pyemu
 from numpy.typing import NDArray
@@ -24,6 +24,8 @@ from scipy.spatial import distance_matrix
 
 from pastas_plugins.pest.forward_run import run, run_pypestworker
 from pypestutils.pestutilslib import PestUtilsLib
+
+from pastas_plugins.pest.obs_penalties import ColocatedStressContribPenalties
 
 pputils = PestUtilsLib()  # the constructor searches for the shared lib
 
@@ -54,8 +56,10 @@ class PestSolver(BaseSolver):
         obs_diff: Optional[bool] = False,
         save_stress_contributions: Optional[bool] = False,
         stress_contribution_groups: Optional[DataFrame | None] = None,
+        stress_contribution_penalty_obs: Optional[dict] = None,
         phi_factors: Optional[dict] = {},
         multimodel_pastas_prior_pcov_info: Series | None = None,
+        date_format: Optional[str]="%d/%m/%Y",
         **kwargs,
     ) -> None:
         """Initialize the PEST solver.
@@ -110,6 +114,18 @@ class PestSolver(BaseSolver):
             Column "save_all" is a flag for each model - for each model (index 0 model name set),
             if any of these are True, then all stress contributions are saved for this model
              (which can be big), not just the identified istress_names/groups. Default is None.
+        stress_contribution_penalty_obs : dict, optional:
+            PEST observation penalty data for 1) colocated bores' stress contributions (target differences zero); and
+            2) models (obs bores) located between (closer to) a specified stress contribution group's bores' centroid
+            and another model (obs bore) should have larger stress contributions; the latter is only done for the
+            closest bore along a line connecting a given model and the stress contribution group centroid (within a
+            maximum buffer distance and outside colocated_penalty_max_separation_distance (see below)).
+            If a dict is provided, it must have the following key/value pairs for colocated bore penalties:
+            [colocated_penalty_obs (bool), colocated_penalty_max_separation_distance (float),
+            colocated_penalty_max_difference_percent (float), and colocated_penalty_obs_phi_factor (float)].
+            ...And for penalties between bores and stress contribution group centroids:
+            [between_penalty_obs (bool), between_penalty_max_distance_from_connecting_line (float),].
+            Default is None.
         phi_factors : dict, optional
             Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
             via weighting the prior. Default is an empty dict (no phi factors applied in pest). NOTE: This is
@@ -184,6 +200,21 @@ class PestSolver(BaseSolver):
         self.stress_contribution_groups = None
         if self.save_stress_contributions:
             self.stress_contribution_groups = stress_contribution_groups
+        if stress_contribution_penalty_obs is None:
+            self.stress_contribution_penalty_obs = dict(
+                colocated_penalty_obs=False,
+                colocated_penalty_max_separation_distance=0.0,
+                colocated_penalty_max_difference_percent=10.0,
+                colocated_penalty_obs_phi_factor=0.1,
+            )
+        else:
+            req_keys = ["colocated_penalty_obs", "colocated_penalty_max_separation_distance",
+                        "colocated_penalty_max_difference_percent", "colocated_penalty_obs_phi_factor"]
+            missing_keys = [k for k in req_keys if k not in stress_contribution_penalty_obs.keys()]
+            assert len(missing_keys) == 0, (
+                logger.error(
+                    fr"The following required keys are not provided in the stress_contribution_penalty_obs dict:\n{missing_keys}"
+                ))
         self.phi_factors: dict = phi_factors
         self.multimodel_pastas_prior_pcov_info: Series = multimodel_pastas_prior_pcov_info
         if self.multimodel_pastas_prior_pcov_info is not None:
@@ -192,6 +223,10 @@ class PestSolver(BaseSolver):
         self.models = {} # dict of models {model.name: model} to be solved by pest simultaneously
         self.vary_by_model = {} # pastas par vary bools for each model
         self.pcovs = {}  # dict of pcovs {model.name: pcov} for each model to be solved by pest simultaneously
+
+        self.coordinates = None
+        self.ml_xy = None
+        self.ml_gdf = None
 
         self.stress_obs = None
 
@@ -366,7 +401,7 @@ class PestSolver(BaseSolver):
                 value_name="Observations",
             ).set_index(["column_names","date"])
             contribs_file = Path(self.model_ws / f"sim_stress_contribs_{ml_name}.csv")
-            contribs_all.to_csv(contribs_file, date_format="%d/%m/%Y")
+            contribs_all.to_csv(contribs_file, date_format=self.date_format)
             copy_file(contribs_file, self.temp_ws)
             contribs_all.loc[:, "model_name"] = ml_name
             contribs_all.loc[:, "obs_type"] = "stress_contribution"
@@ -395,11 +430,11 @@ class PestSolver(BaseSolver):
             if self.obs_diff:
                 obs_diffs = self._get_obs_diff(observations)
                 obs_diff_file = self.model_ws / f"simulation_head_diffs_{ml_name}.csv"
-                obs_diffs.Observations.to_csv(obs_diff_file, date_format="%d/%m/%Y")
+                obs_diffs.Observations.to_csv(obs_diff_file, date_format=self.date_format)
                 copy_file(obs_diff_file, self.temp_ws)
                 obs_diffs_list.append(obs_diffs.copy())
             obs_file = self.model_ws / f"simulation_{ml_name}.csv"
-            observations.Observations.to_csv(obs_file, date_format="%d/%m/%Y")
+            observations.Observations.to_csv(obs_file, date_format=self.date_format)
             copy_file(obs_file, self.temp_ws)
             obs_list.append(observations.copy())
 
@@ -414,7 +449,7 @@ class PestSolver(BaseSolver):
             )
             headsmp_obs.index.name = "date"
             headsmp_obs_file = self.model_ws / f"simulation_{ml_name}.smp.csv"
-            headsmp_obs.Observations.to_csv(headsmp_obs_file, date_format="%d/%m/%Y")
+            headsmp_obs.Observations.to_csv(headsmp_obs_file, date_format=self.date_format)
             copy_file(headsmp_obs_file, self.temp_ws)
             headsmp_obs_list.append(headsmp_obs.copy())
 
@@ -463,6 +498,14 @@ class PestSolver(BaseSolver):
         if self.save_stress_contributions:
             self.sm_contribs = self._get_stressmodel_contributions()
         self.stress_obs = pd.concat([self.stress_obs, self.sm_contribs], ignore_index=False)
+
+        # stressmodel contribution difference penalties (colocated bores)
+        if self.stress_contribution_penalty_obs["colocated_penalty_obs"]:
+            self.colocated_diff_obs = ColocatedStressContribPenalties(
+                solver=self,
+                max_separation_distance=self.stress_contribution_penalty_obs["colocated_max_separation_distance"],
+                max_difference_percent=self.stress_contribution_penalty_obs["colocated_max_difference_percent"],
+            )
 
         # setup parameters
         pars_list = []
@@ -541,7 +584,6 @@ class PestSolver(BaseSolver):
             self,
             ml_name: str | None,
             obs_types: list,
-            date_format: str = "%d/%m/%Y",
             rsplit_column_name: bool = True,
     ) -> None:
         """
@@ -550,7 +592,7 @@ class PestSolver(BaseSolver):
         """
         tmp_obs = self.pf.obs_dfs[-1].assign(
             date=self.pf.obs_dfs[-1].obsnme.apply(
-                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=date_format)),
+                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=self.date_format)),
             column_names=self.pf.obs_dfs[-1].obsnme.apply(
                 lambda x: x.rsplit("_date:")[0].rsplit("_column_names:", 1)[-1]
             )
@@ -589,7 +631,6 @@ class PestSolver(BaseSolver):
             self,
             ml_name: str,
             obs_types: list,
-            date_format="%d/%m/%Y",
     ) -> None:
         """
         Add pest obsnme and obgnme to self.observations dataframe. Designed to be called
@@ -597,7 +638,7 @@ class PestSolver(BaseSolver):
         """
         tmp_obs = self.pf.obs_dfs[-1].assign(
             date=self.pf.obs_dfs[-1].obsnme.apply(
-                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=date_format))
+                lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=self.date_format))
         )
         omask = (self.observations.model_name == ml_name) & \
                 (self.observations.obs_type.isin(obs_types))
@@ -612,23 +653,40 @@ class PestSolver(BaseSolver):
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.observations.loc[omask].set_index("obsnme").weight
         tmp_obs = None
 
+    def _assign_model_coords(self, force_update: bool=False) -> None:
+        """Assign model coords np array (coordinates; in order of solver.models.keys() order), df (ml_xy),
+        and gdf (ml_gdf) to solver"""
+        coords = (self.coordinates, self.ml_xy, self.ml_gdf)
+        match coords:
+            # guard against repeatedly re-assigning coords
+            case _ if (None in coords | force_update):
+                self.coordinates = np.array([
+                    [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
+                    for ml_name, ml in self.models.items()
+                ])
+                self.ml_xy = pd.DataFrame(
+                    index=pd.Index(list(self.models.keys()), name="ml_name"),
+                    columns=["x", "y"], data=self.coordinates
+                )
+                self.ml_gdf = gpd.GeoDataFrame(
+                    index=self.ml_xy.index, geometry=gpd.points_from_xy(self.ml_xy.x, self.ml_xy.y)
+                )
+            case _:
+                return
+
     def _get_multimodel_pcov(
             self,
             pst,
             pastas_ml_pars,
     ) -> pyemu.Cov:
         """Builds a spatial covariance matrix between each pastas parameter across all models, by distance"""
+        self._assign_model_coords()
 
         def _get_models_vario_range():
             """get xy coords of each model and calc a separation distance matrix. Calc a separation distance matrix,
             find n nearest neighbout and get avg sep dist."""
-            coordinates = np.array([
-                [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
-                for ml_name,ml in self.models.items()
-            ])
-            ml_xy = pd.DataFrame(index=self.models.keys(), columns=["x", "y"], data=coordinates)
             dist_matrix = pd.DataFrame(
-                data=distance_matrix(coordinates, coordinates, p=2),
+                data=distance_matrix(self.coordinates, self.coordinates, p=2),
                 index=list(self.models.keys()),
                 columns=list(self.models.keys()),
             )
@@ -706,16 +764,16 @@ class PestSolver(BaseSolver):
         par_df.loc[~constant_d_mask, ["x", "y"]] = mod2stress_xy.loc[par_df.loc[~constant_d_mask].mod2stress_names.values, ["x", "y"]].values
 
         log_mask = par_df.partrans == "log"
-        par_df.loc[log_mask, "ps_vario_sill"] = (np.log10(par_df.loc[log_mask].parubnd.values) -
-                                                 np.log10(par_df.loc[log_mask].parlbnd).values) / 4.0
-        par_df.loc[~log_mask, "ps_vario_sill"] = (par_df.loc[~log_mask].parubnd - par_df.loc[~log_mask].parlbnd) / 4.0
+        par_df.loc[log_mask, "ps_vario_sill"] = ((np.log10(par_df.loc[log_mask].parubnd.values) -
+                                                 np.log10(par_df.loc[log_mask].parlbnd).values) / 4.0)**2
+        par_df.loc[~log_mask, "ps_vario_sill"] = ((par_df.loc[~log_mask].parubnd - par_df.loc[~log_mask].parlbnd) / 4.0)**2
 
         # update constant_d range and sill specifically
         par_df.loc[constant_d_mask, "ps_vario_range"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_range"]
         par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
         par_df.loc[constant_d_mask, ["x","y"]] = ml_xy.loc[par_df.loc[constant_d_mask].ml_name, ["x","y"]].values
 
-        par_df.to_csv(self.temp_ws / f"pest.prior.parcovs.par_info.csv", date_format="%d/%m/%Y")
+        par_df.to_csv(self.temp_ws / f"pest.prior.parcovs.par_info.csv", date_format=self.date_format)
 
         # build covmat
         covs, names_list = [], []
@@ -873,10 +931,17 @@ class PestSolver(BaseSolver):
                     self._update_stress_obs_names(
                         ml_name=ml_name,
                         obs_types=["stress_contribution"],
-                        date_format="%d/%m/%Y",
                         rsplit_column_name=False,
                     )
                     done_stress_contrib_files.append(mod_file)
+
+        # stress contribution penalties - colocated bores <x% difference of max
+        if self.stress_contribution_penalty_obs["colocated_penalty_obs"]:
+            penalty_obs = self.colocated_diff_obs.make_difference_obs()
+        # stress contribution penalties - bores (models) located between a specified stress contribution group centroid
+        # and a given model (obs_bore) should have a greater stress contribution than the given model because it is
+        # further away.
+
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
@@ -892,7 +957,6 @@ class PestSolver(BaseSolver):
                 self._update_stress_obs_names(
                     ml_name=None,
                     obs_types=["stress_obs"],
-                    date_format=sm_p.date_format,
                 )
 
         # python scripts to run
@@ -1075,9 +1139,9 @@ class PestSolver(BaseSolver):
         ).set_index(["model_name","obgnme","date"])
         self.observation_index.to_json(str(self.temp_ws / "observation_index.json"))
 
-        self.stress_obs.to_csv(Path(self.model_ws / "stress_obs.csv"), date_format="%d/%m/%Y")
+        self.stress_obs.to_csv(Path(self.model_ws / "stress_obs.csv"), date_format=self.date_format)
         copy_file(Path(self.model_ws / "stress_obs.csv"), self.temp_ws)
-        self.observations.to_csv(Path(self.model_ws / "observations.csv"), date_format="%d/%m/%Y")
+        self.observations.to_csv(Path(self.model_ws / "observations.csv"), date_format=self.date_format)
         copy_file(Path(self.model_ws / "observations.csv"), self.temp_ws)
 
         self.ppw_kwargs = {
@@ -1621,7 +1685,7 @@ class PestIesSolver(PestSolver):
                     ], axis=0, ignore_index=False,
             )
             pst.observation_data = pst.observation_data.join(join_data, how="left")
-            pst.observation_data.loc[:, "date"] = pd.to_datetime(pst.observation_data.date, format="%d/%m/%Y")
+            pst.observation_data.loc[:, "date"] = pd.to_datetime(pst.observation_data.date, format=self.date_format)
             for ml_name, row in custom_obs_weights.iterrows():
                 mask = (pst.observation_data.obsnme.str.contains(f"{ml_name.lower()}", regex=True)) & \
                         (pst.observation_data.obs_type == row.obs_type) & \
