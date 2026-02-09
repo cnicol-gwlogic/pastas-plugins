@@ -25,7 +25,7 @@ from scipy.spatial import distance_matrix
 from pastas_plugins.pest.forward_run import run, run_pypestworker
 from pypestutils.pestutilslib import PestUtilsLib
 
-from pastas_plugins.pest.obs_penalties import ColocatedStressContribPenalties
+from pastas_plugins.pest.obs_penalties import StressContribPenaltySettings, ColocatedStressContribPenalties
 
 pputils = PestUtilsLib()  # the constructor searches for the shared lib
 
@@ -56,7 +56,7 @@ class PestSolver(BaseSolver):
         obs_diff: Optional[bool] = False,
         save_stress_contributions: Optional[bool] = False,
         stress_contribution_groups: Optional[DataFrame | None] = None,
-        stress_contribution_penalty_obs: Optional[dict] = None,
+        stress_contribution_penalty_obs: Optional[StressContribPenaltySettings | None] = None,
         phi_factors: Optional[dict] = {},
         multimodel_pastas_prior_pcov_info: Series | None = None,
         date_format: Optional[str]="%d/%m/%Y",
@@ -114,17 +114,18 @@ class PestSolver(BaseSolver):
             Column "save_all" is a flag for each model - for each model (index 0 model name set),
             if any of these are True, then all stress contributions are saved for this model
              (which can be big), not just the identified istress_names/groups. Default is None.
-        stress_contribution_penalty_obs : dict, optional:
+        stress_contribution_penalty_obs : StressContribPenaltySettings | None, optional:
             PEST observation penalty data for 1) colocated bores' stress contributions (target differences zero); and
             2) models (obs bores) located between (closer to) a specified stress contribution group's bores' centroid
             and another model (obs bore) should have larger stress contributions; the latter is only done for the
             closest bore along a line connecting a given model and the stress contribution group centroid (within a
             maximum buffer distance and outside colocated_penalty_max_separation_distance (see below)).
-            If a dict is provided, it must have the following key/value pairs for colocated bore penalties:
+            If a settings object is provided, it must have the following attributes for colocated bore penalties:
             [colocated_penalty_obs (bool), colocated_penalty_max_separation_distance (float),
             colocated_penalty_max_difference_percent (float), and colocated_penalty_obs_phi_factor (float)].
             ...And for penalties between bores and stress contribution group centroids:
-            [between_penalty_obs (bool), between_penalty_max_distance_from_connecting_line (float),].
+            [between_penalty_obs (bool), between_penalty_stress_contribution_groups (list),
+            between_penalty_max_distance_from_connecting_line (float), between_penalty_obs_phi_factor (float)].
             Default is None.
         phi_factors : dict, optional
             Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
@@ -159,6 +160,8 @@ class PestSolver(BaseSolver):
             # Reconstruct the logger after unpickling
             self.__dict__.update(state)
             logger = logging.getLogger(__name__)
+
+        self.logger = logger
 
         BaseSolver.__init__(self, pcov=pcov, nfev=nfev, **kwargs)
         self.long_names = long_names
@@ -201,20 +204,11 @@ class PestSolver(BaseSolver):
         if self.save_stress_contributions:
             self.stress_contribution_groups = stress_contribution_groups
         if stress_contribution_penalty_obs is None:
-            self.stress_contribution_penalty_obs = dict(
+            self.stress_contribution_penalty_obs = StressContribPenaltySettings(
                 colocated_penalty_obs=False,
-                colocated_penalty_max_separation_distance=0.0,
-                colocated_penalty_max_difference_percent=10.0,
-                colocated_penalty_obs_phi_factor=0.1,
+                between_penalty_obs=False
             )
-        else:
-            req_keys = ["colocated_penalty_obs", "colocated_penalty_max_separation_distance",
-                        "colocated_penalty_max_difference_percent", "colocated_penalty_obs_phi_factor"]
-            missing_keys = [k for k in req_keys if k not in stress_contribution_penalty_obs.keys()]
-            assert len(missing_keys) == 0, (
-                logger.error(
-                    fr"The following required keys are not provided in the stress_contribution_penalty_obs dict:\n{missing_keys}"
-                ))
+
         self.phi_factors: dict = phi_factors
         self.multimodel_pastas_prior_pcov_info: Series = multimodel_pastas_prior_pcov_info
         if self.multimodel_pastas_prior_pcov_info is not None:
@@ -227,6 +221,8 @@ class PestSolver(BaseSolver):
         self.coordinates = None
         self.ml_xy = None
         self.ml_gdf = None
+        self.sm_xy = None
+        self.sm_gdf = None
 
         self.stress_obs = None
 
@@ -653,7 +649,7 @@ class PestSolver(BaseSolver):
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.observations.loc[omask].set_index("obsnme").weight
         tmp_obs = None
 
-    def _assign_model_coords(self, force_update: bool=False) -> None:
+    def assign_model_coords(self, force_update: bool=False) -> None:
         """Assign model coords np array (coordinates; in order of solver.models.keys() order), df (ml_xy),
         and gdf (ml_gdf) to solver"""
         coords = (self.coordinates, self.ml_xy, self.ml_gdf)
@@ -674,13 +670,46 @@ class PestSolver(BaseSolver):
             case _:
                 return
 
+    def assign_stressmodel_coords(self, force_update: bool=False) -> None:
+        """
+        Assign stressmodel istress coords df (sm_xy),
+        and gdf (sm_gdf) to solver.
+        self.sm_xy is a DataFrame indexed by (ml_name,stressmodel_name, istress_name) and values [x,y]
+        self.sm_gdf is a GeoDataFrame of sm_xy (values are x,y,geometry)
+        """
+        coords = (self.sm_xy, self.sm_gdf)
+        match coords:
+            # guard against repeatedly re-assigning coords
+            case _ if (None in coords | force_update):
+                idx = pd.MultiIndex.from_arrays([[]]*3,
+                    names=["ml_name", "sm_name", "istress_name"])
+                sm_xy = pd.DataFrame(index=idx)
+                sm_xlocs, sm_ylocs, sm_stressnames = [],[],[]
+                ml_names, sm_names = [],[]
+                for ml_name,ml in self.models.items():
+                    for sm_name, sm in ml.stressmodels.items():
+                        sm_xlocs += [stress.metadata["x"] for stress in sm.stress]
+                        sm_ylocs += [stress.metadata["y"] for stress in sm.stress]
+                        sm_stressnames += [stress.name for stress in sm.stress]
+                        ml_names += [ml_name] * len(sm_xlocs)
+                        sm_names += [sm_name] * len(sm_xlocs)
+                        new_idx = pd.MultiIndex.from_arrays([ml_names, sm_names, sm_stressnames], names=idx.names)
+                        new_data = pd.DataFrame(index=idx.union(new_idx), data=dict(x=sm_xlocs, y=sm_ylocs))
+                        sm_xy = pd.concat([sm_xy, new_data], ignore_index=False)
+                self.sm_xy = sm_xy
+                self.sm_gdf = gpd.GeoDataFrame(
+                    index=self.sm_xy.index, geometry=gpd.points_from_xy(self.sm_xy.x, self.sm_xy.y)
+                )
+            case _:
+                return
+
     def _get_multimodel_pcov(
             self,
             pst,
             pastas_ml_pars,
     ) -> pyemu.Cov:
         """Builds a spatial covariance matrix between each pastas parameter across all models, by distance"""
-        self._assign_model_coords()
+        self.assign_model_coords()
 
         def _get_models_vario_range():
             """get xy coords of each model and calc a separation distance matrix. Calc a separation distance matrix,
@@ -936,7 +965,7 @@ class PestSolver(BaseSolver):
                     done_stress_contrib_files.append(mod_file)
 
         # stress contribution penalties - colocated bores <x% difference of max
-        if self.stress_contribution_penalty_obs["colocated_penalty_obs"]:
+        if self.stress_contribution_penalty_obs.colocated_penalty_obs:
             penalty_obs = self.colocated_diff_obs.make_difference_obs()
         # stress contribution penalties - bores (models) located between a specified stress contribution group centroid
         # and a given model (obs_bore) should have a greater stress contribution than the given model because it is
