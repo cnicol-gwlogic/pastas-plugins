@@ -57,7 +57,7 @@ class PestSolver(BaseSolver):
         save_stress_contributions: Optional[bool] = False,
         stress_contribution_groups: Optional[DataFrame | None] = None,
         stress_contribution_penalty_obs: Optional[StressContribPenaltySettings | None] = None,
-        phi_factors: Optional[dict] = {},
+        phi_factors: Optional[DataFrame] = None,
         multimodel_pastas_prior_pcov_info: Series | None = None,
         date_format: Optional[str]="%d/%m/%Y",
         **kwargs,
@@ -129,9 +129,9 @@ class PestSolver(BaseSolver):
             IMPORTANT NOTE: All models in solver.models must use the SAME stress direction (up OR down) for
             penalty_obs to work correctly.
             Default is None.
-        phi_factors : dict, optional
-            Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
-            via weighting the prior. Default is an empty dict (no phi factors applied in pest). NOTE: This is
+        phi_factors : DataFrame | None, optional
+            DataFrame indexed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
+            via weighting the prior. Default is None (no phi factors applied in pest). NOTE: This is
             not yet supported for GLM/HP - only IES.
         multimodel_pastas_prior_pcov_info : Optional[Series | None]
             Details to apply Pastas parameter covariance between models in solver.models.
@@ -210,8 +210,7 @@ class PestSolver(BaseSolver):
                 colocated_penalty_obs=False,
                 between_penalty_obs=False
             )
-
-        self.phi_factors: dict = phi_factors
+        self.phi_factors: DataFrame = pd.DataFrame() if phi_factors is None else phi_factors
         self.multimodel_pastas_prior_pcov_info: Series = multimodel_pastas_prior_pcov_info
         if self.multimodel_pastas_prior_pcov_info is not None:
             logger.warning("multimodel_pastas_prior_pcov_info provided; user beware that model.oseries.metadata['x'] "
@@ -498,12 +497,28 @@ class PestSolver(BaseSolver):
         self.stress_obs = pd.concat([self.stress_obs, self.sm_contribs], ignore_index=False)
 
         # stressmodel contribution difference penalties (colocated bores)
-        if self.stress_contribution_penalty_obs["colocated_penalty_obs"]:
+        adjust_phi_factors_down = 0.0
+        if self.stress_contribution_penalty_obs.colocated_penalty_obs:
             self.colocated_diff_obs = ColocatedStressContribPenalties(
                 solver=self,
-                max_separation_distance=self.stress_contribution_penalty_obs["colocated_max_separation_distance"],
-                max_difference_percent=self.stress_contribution_penalty_obs["colocated_max_difference_percent"],
+                max_separation_distance=self.stress_contribution_penalty_obs.colocated_max_separation_distance,
+                max_difference_percent=self.stress_contribution_penalty_obs.colocated_max_difference_percent,
             )
+            adjust_phi_factors_down += self.stress_contribution_penalty_obs.colocated_penalty_obs_phi_factor
+        # stressmodel contribution difference penalties (for smaller contributions to bores closer vs further from stressor)
+        if self.stress_contribution_penalty_obs.between_penalty_obs:
+            self.between_diff_obs = BetweenStressContribPenalties(
+                solver=self,
+                max_separation_distance=self.stress_contribution_penalty_obs.between_penalty_max_distance_from_connecting_line,
+            )
+            adjust_phi_factors_down += self.stress_contribution_penalty_obs.between_penalty_obs_phi_factor
+        # adjust phi factors to allow for these two penalty groups' visibility
+        if adjust_phi_factors_down > 0.0:
+            phi_factors -= (phi_factors * adjust_phi_factors_down)
+            if self.stress_contribution_penalty_obs.colocated_penalty_obs:
+                phi_factors.loc[self.colocated_diff_obs.obsgp] = self.stress_contribution_penalty_obs.colocated_penalty_obs_phi_factor
+            if self.stress_contribution_penalty_obs.between_penalty_obs:
+                phi_factors.loc[self.between_diff_obs.obsgp] = self.stress_contribution_penalty_obs.between_penalty_obs_phi_factor
 
         # setup parameters
         pars_list = []
@@ -972,7 +987,8 @@ class PestSolver(BaseSolver):
         # stress contribution penalties - bores (models) located between a specified stress contribution group centroid
         # and a given model (obs_bore) should have a greater stress contribution than the given model because it is
         # further away.
-
+        if self.stress_contribution_penalty_obs.between_penalty_obs:
+            penalty_obs = self.between_diff_obs.make_difference_obs()
 
         # stress obs
         for sm_p in self.stressmodel_parameterisers:
@@ -1000,12 +1016,10 @@ class PestSolver(BaseSolver):
             pst.parameter_data["longname"] = pst.parameter_data.index.values
 
         # define factored obs weights if requested
-        if isinstance(self, PestIesSolver) and self.phi_factors != {}:
+        if isinstance(self, PestIesSolver) and not self.phi_factors.empty:
             # ies phi factor file
             phi_factor_file = str(self.pf.new_d / "pest.phi_factors.csv")
-            pd.DataFrame.from_dict(self.phi_factors, orient="index").to_csv(
-                phi_factor_file, header=None
-            )
+            self.phi_factors.to_csv(phi_factor_file, header=None)
             pst.pestpp_options.update({"ies_phi_factor_file": Path(phi_factor_file).name})
         elif self.phi_factors != {}:
             # TODO: manually edit weights based on initial simulation residuals (pest_hp / glm cases)

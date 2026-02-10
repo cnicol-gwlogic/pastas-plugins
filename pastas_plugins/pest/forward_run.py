@@ -13,6 +13,7 @@ def run() -> None:
     from pastas.io.base import load as load_model
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
+    from pastas_plugins.pest.obs_penalties import get_colocated_differences, get_between_bores_differences   # noqa: F401
 
     # base path
     fpath = Path(__file__).parent
@@ -22,9 +23,20 @@ def run() -> None:
 
     # load save_stress_contributions
     save_stress_contributions = False
+    sim_stress_contrib_colocated_bores = None
+    sim_stress_contrib_between_bore_pairs = None
     if Path("stress_contribution_groups.csv").exists():
         save_stress_contributions = True
         stress_contribution_groups = read_csv("stress_contribution_groups.csv", index_col=[0,1])
+        if Path(f"sim_stress_contrib_colocated_bores.csv").exists():
+            sim_stress_contrib_colocated_bores = read_csv(
+                "sim_stress_contrib_colocated_bores.csv", index_col=["ml_name", "ml_name_r"]
+            )
+        if Path(f"sim_stress_contrib_colocated_bores.csv").exists():
+            sim_stress_contrib_between_bore_pairs = read_csv(
+                "sim_stress_contrib_between_bore_pairs.csv",
+                index_col=["stress_contribution_group", "buffer_name","ml_name"],
+            )
 
     # update standard pastas model parameters
     parameters = read_csv(fpath / "parameters_sel.csv", index_col=0)
@@ -120,6 +132,27 @@ def run() -> None:
             ).set_index(["column_names","date"])
             contribs_all.to_csv(fpath / f"sim_stress_contribs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
+            # stress contribution penalties
+            if sim_stress_contrib_colocated_bores is not None:
+                colocated_differences = get_colocated_differences(
+                    colocated_bores=sim_stress_contrib_colocated_bores,
+                    sm_contribs=contribs_all,
+                    set_to_max_difference_percent=False,
+                    max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
+                )
+                colocated_differences.to_csv(
+                    f"sim_stress_contrib_colocated_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
+                )
+            if sim_stress_contrib_between_bore_pairs is not None:
+                between_bore_differences = get_between_bores_differences(
+                    between_bore_pairs=sim_stress_contrib_between_bore_pairs, 
+                    sm_contribs=contribs_all, set_to_zero=False,
+                )
+                between_bore_differences.to_csv(
+                    f"sim_stress_contrib_between_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
+                )
+
+
 def run_pypestworker(
     pst: str | pyemu.Pst,
     host: int,
@@ -132,10 +165,13 @@ def run_pypestworker(
     stress_obs: DataFrame | None = None,
     save_stress_contributions: bool = False,
     stress_contribution_groups: Series | None = None,
+    sim_stress_contrib_colocated_bores: DataFrame | None = None,
+    sim_stress_contrib_between_bore_pairs: DataFrame | None = None,
 ) -> None:
     from logging import getLogger
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
+    from pastas_plugins.pest.obs_penalties import get_colocated_differences, get_between_bores_differences   # noqa: F401
     from pandas import concat, date_range
     from pandas.tseries.offsets import MonthEnd
 
@@ -269,7 +305,7 @@ def run_pypestworker(
                     names = istress_names.istress_names.values.flatten()
                     # aggregate selected groups of istress contributions
                     contribs_all.loc[:, label] = contribs_all.loc[:, names].sum(axis=1)
-                # drop unspecific istress_names / labels from the df
+                # drop unspecified istress_names / labels from the df
                 if (stress_contribution_groups.xs(ml_name).save_all == False).any():
                     contribs_all = contribs_all.loc[:,
                     contribs_all.columns.isin(stress_contribution_groups.xs(ml_name).index.get_level_values("label"))
@@ -286,6 +322,26 @@ def run_pypestworker(
                 contribs_all.index = obsnmes.values
                 # store the series
                 contribs_all_list.append(contribs_all.Observations)
+
+                # stress contribution penalties
+                if sim_stress_contrib_colocated_bores is not None:
+                    colocated_differences = get_colocated_differences(
+                        colocated_bores=sim_stress_contrib_colocated_bores,
+                        sm_contribs=contribs_all,
+                        set_to_max_difference_percent=False,
+                        max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
+                    ).loc[:,"Observations"]
+                    # TODO IMPLEMENT THIS OBSNME BIT
+                    #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
+                    #colocated_differences.index = obsnmes.values
+                if sim_stress_contrib_between_bore_pairs is not None:
+                    between_bore_differences = get_between_bores_differences(
+                        between_bore_pairs=sim_stress_contrib_between_bore_pairs,
+                        sm_contribs=contribs_all, set_to_zero=False,
+                    ).loc[:,"Observations"]
+                    # TODO IMPLEMENT THIS OBSNME BIT
+                    #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
+                    #colocated_differences.index = obsnmes.values
 
         obsvals_all = concat(obsvals_list, axis=0, ignore_index=False)
         sim_smp_vals = concat(headsmp_list, axis=0, ignore_index=False)
