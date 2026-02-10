@@ -126,6 +126,8 @@ class PestSolver(BaseSolver):
             ...And for penalties between bores and stress contribution group centroids:
             [between_penalty_obs (bool), between_penalty_stress_contribution_groups (list),
             between_penalty_max_distance_from_connecting_line (float), between_penalty_obs_phi_factor (float)].
+            IMPORTANT NOTE: All models in solver.models must use the SAME stress direction (up OR down) for
+            penalty_obs to work correctly.
             Default is None.
         phi_factors : dict, optional
             Dict keyed by obs group (obgnme) tag, with values being the factor of Phi desired for that obs group
