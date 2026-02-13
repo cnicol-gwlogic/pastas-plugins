@@ -399,9 +399,9 @@ class PestSolver(BaseSolver):
             contribs_all = contribs_all.reset_index(drop=False).melt(
                 id_vars="date",
                 value_vars=contribs_all.columns,
-                var_name="column_names",
+                var_name="colnme",
                 value_name="Observations",
-            ).set_index(["column_names","date"])
+            ).set_index(["colnme","date"])
             contribs_file = Path(self.model_ws / f"sim_stress_contribs_{ml_name}.csv")
             contribs_all.to_csv(contribs_file, date_format=self.date_format)
             copy_file(contribs_file, self.temp_ws)
@@ -611,14 +611,14 @@ class PestSolver(BaseSolver):
         tmp_obs = self.pf.obs_dfs[-1].assign(
             date=self.pf.obs_dfs[-1].obsnme.apply(
                 lambda x: pd.to_datetime(x.rsplit("_date:")[-1], format=self.date_format)),
-            column_names=self.pf.obs_dfs[-1].obsnme.apply(
-                lambda x: x.rsplit("_date:")[0].rsplit("_column_names:", 1)[-1]
+            colnme=self.pf.obs_dfs[-1].obsnme.apply(
+                lambda x: x.rsplit("_date:")[0].rsplit("_colnme:", 1)[-1]
             )
         )
         if rsplit_column_name:
-            tmp_obs["column_names"] = tmp_obs.column_names.apply(
+            tmp_obs["colnme"] = tmp_obs.colnme.apply(
                 lambda x: f"{x.rsplit('_', 1)[0]}_{x.rsplit('_', 1)[-1]}"
-            ) # these are lower case because pest obsnme is (from which column_names is derived - above)
+            ) # these are lower case because pest obsnme is (from which colnme is derived - above)
         omask = self.stress_obs.obs_type.isin(obs_types)
         if "obsnme" in self.stress_obs.columns:
             omask = omask & (self.stress_obs.obsnme.isna())
@@ -629,18 +629,18 @@ class PestSolver(BaseSolver):
         og_index0 = join_obs.index.levels[0]
         join_obs.index = join_obs.index.set_levels(
             join_obs.index.levels[0].str.lower(),
-            level="column_names"
-        ) # because pest obsnme-derived column_names is lower case
+            level="colnme"
+        ) # because pest obsnme-derived colnme is lower case
         try:
             join_obs = join_obs.drop(columns=["obsnme","obgnme"])
         except: # if the cols don't exist (on first use of this function) we get an exception
             pass
         join_obs = join_obs.join(
-            tmp_obs[["column_names", "date", "obsnme", "obgnme"]].set_index(["column_names", "date"]), how="left"
+            tmp_obs[["colnme", "date", "obsnme", "obgnme"]].set_index(["colnme", "date"]), how="left"
         )
         join_obs.index = join_obs.index.set_levels(
-            og_index0, level="column_names",
-        ) # revert index column_names to og case
+            og_index0, level="colnme",
+        ) # revert index colnme to og case
 
         self.stress_obs.loc[omask, ["obsnme","obgnme"]] = join_obs.loc[:,["obsnme","obgnme"]]
         self.pf.obs_dfs[-1].loc[:,"weight"] = self.stress_obs.loc[omask].dropna(subset="obsnme").set_index("obsnme").weight
@@ -958,7 +958,7 @@ class PestSolver(BaseSolver):
                     obsgp = f"stress_contrib_{ml_name}"
                     self.pf.add_observations(
                         mod_file,
-                        index_cols=["column_names","date"],
+                        index_cols=["colnme","date"],
                         use_cols=["Observations"],
                         obsgp=obsgp,
                     )
@@ -1035,7 +1035,7 @@ class PestSolver(BaseSolver):
                     sm_p.stress_pars.loc[:,["parval1","partrans","parlbnd","parubnd"]]
                 )
                 sm_p.stress_pars = sm_p.stress_pars.reset_index(drop=False).set_index(
-                    ["column_names", "Datetime"]
+                    ["colnme", "Datetime"]
                 )
 
         # Tie duplicate wellmodel pars to other wellmodels' pars.

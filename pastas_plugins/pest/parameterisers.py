@@ -232,7 +232,7 @@ class Parameteriser:
         ----------
         source_points : DataFrame
             DataFrame with 'x' and 'y' columns (x and y source point coordinates for kriging),
-            with MultiIndex of ["column_names","Datetime"] ("column_names" being stressmodel
+            with MultiIndex of ["colnme","Datetime"] ("colnme" being stressmodel
             stress timeseries names).
 
         Returns
@@ -246,7 +246,7 @@ class Parameteriser:
                 sill["partrans"] = "log" if solver.par_transform == "log" else "none"
             logmask = sill.partrans == "log"
             if logmask.any():
-                sill_mins = sill.loc[logmask].groupby(level="column_names")["parlbnd"].transform(
+                sill_mins = sill.loc[logmask].groupby(level="colnme")["parlbnd"].transform(
                     "min"
                 )
                 sill.loc[logmask, ["parubnd", "parlbnd"]] = (sill.loc[logmask, ["parubnd", "parlbnd"]].add(
@@ -259,11 +259,11 @@ class Parameteriser:
         if self.par_freq is None:
             self.stress_parcov = pyemu.Cov(
                 x=self.t_variogram_sill,
-                names=self.source_points.column_names,
+                names=self.source_points.colnme,
                 isdiagonal=True,
             )
         else:
-            # easiest to use build_covar_matrix_2d here with zones being column_names,
+            # easiest to use build_covar_matrix_2d here with zones being colnme,
             # but build_covar_matrix_2d can only handle <=10 zones. Se we concat to block diagonal matrix manually
             covs = [
                 pputils.build_covar_matrix_2d(
@@ -282,14 +282,14 @@ class Parameteriser:
                         0
                     ],  # I think this is right (?). Don't think it matters as this covmat is square.
                 )
-                for col in source_points.index.get_level_values("column_names").unique()
+                for col in source_points.index.get_level_values("colnme").unique()
             ]  # one cov per wellmodel stress timeseries -> all to be concatenated into one block diagonal cov
             names_list = [
                 names
                 for names in [
                     source_points.xs(col).parnme.to_list()
                     for col in source_points.index.get_level_values(
-                        "column_names"
+                        "colnme"
                     ).unique()
                 ]
             ]
@@ -404,21 +404,21 @@ class Parameteriser:
         return dtindex.to_series().sub(dtindex.min()).dt.total_seconds() / 86400.0
 
     def _build_parnme_indexer(self) -> None:
-        cols = self.source_points.column_names.unique()
-        cname_lower2cname = Series(index=[c.lower() for c in cols], data=cols, name="column_names")
+        cols = self.source_points.colnme.unique()
+        cname_lower2cname = Series(index=[c.lower() for c in cols], data=cols, name="colnme")
         index_base = self.stress_pars.parnme.apply(
             lambda s: s.split("_pstyle:d_datetime:")[-1]
         )
-        cnames = index_base.apply(lambda s: s.split("_column_names:")[-1])
+        cnames = index_base.apply(lambda s: s.split("_colnme:")[-1])
         dts = pd.to_datetime(
-            index_base.apply(lambda s: s.split("_column_names:")[0]),
+            index_base.apply(lambda s: s.split("_colnme:")[0]),
             format="%d/%m/%Y",
         )
         self.stress_pars["Datetime"] = dts.values
-        self.stress_pars["column_names_lower"] = cnames.str.lower()
+        self.stress_pars["colnme_lower"] = cnames.str.lower()
         self.stress_pars = self.stress_pars.merge(
             cname_lower2cname,
-            left_on="column_names_lower",
+            left_on="colnme_lower",
             right_index=True,
             how="left"
         )
@@ -469,14 +469,14 @@ class Parameteriser:
         if updated_sourcevals is None:  # non-pypestworker call (worker dirs on disk)
             sourcevals = pd.read_csv(
                 self.modelfile.name,
-                index_col=["column_names", "Datetime"],
+                index_col=["colnme", "Datetime"],
                 parse_dates=["Datetime"],
                 date_format=self.date_format,
             )  # read pest-updated values from disk
         else:  # pypestworker call - updated values from series (parnme:value) in memory
             sourcevals = self.modelfile_df_org.reset_index(drop=False).set_index("parnme")
             sourcevals.loc[:, "value"] = updated_sourcevals # this should already be indexed by parnme in forward run, so in order
-            sourcevals = sourcevals.reset_index(drop=False).set_index(["column_names","Datetime"])
+            sourcevals = sourcevals.reset_index(drop=False).set_index(["colnme","Datetime"])
 
         krig_cols = self.stress_names
         if stress_names is not None:
@@ -564,14 +564,14 @@ class Parameteriser:
         Parameters
         ----------
         obs_data : Optional[Series]
-            Observed stress value data points. Indexed by [column_names (bore), Datetime]
+            Observed stress value data points. Indexed by [colnme (bore), Datetime]
 
         Returns
         -------
         None
         """
         self.obs_data = obs_data
-        self.obs_data.index.names = ["column_names","date"]
+        self.obs_data.index.names = ["colnme","date"]
 
     def mod2obs(self) -> Series:
         """
@@ -580,12 +580,12 @@ class Parameteriser:
         # insert obs indices --> interp(linear) -->keep only obs dts
         self.stress.index.name = "Datetime"  # somewhere this has reverted to None...no idea why/where.
         modobs = self.stress.melt(
-            var_name="column_names", ignore_index=False,
+            var_name="colnme", ignore_index=False,
             value_name="Observations"
-        ).reset_index(drop=False).set_index(["column_names","Datetime"])
-        modobs.index.names = ["column_names","date"]
+        ).reset_index(drop=False).set_index(["colnme","Datetime"])
+        modobs.index.names = ["colnme","date"]
         new_idx = modobs.index.union(self.obs_data.index)
-        modobs = modobs.reindex(new_idx).groupby(level="column_names").transform(
+        modobs = modobs.reindex(new_idx).groupby(level="colnme").transform(
             lambda x: x.interpolate(method='linear')
         )
         modobs = modobs.loc[self.obs_data.index].Observations
@@ -606,7 +606,7 @@ class Parameteriser:
         def get_base_points(source_points):
             base_points = source_points.loc[
                 source_points.intervals > max_ndays,
-                : #["intervals", "column_names", "Datetime"]
+                : #["intervals", "colnme", "Datetime"]
             ].copy()
             return base_points
 
@@ -634,11 +634,11 @@ class Parameteriser:
             new_points.loc[:, "x"] = new_points.Datetime.sub(source_points.Datetime.min()).dt.total_seconds() / 86400.0
 
             source_points = pd.concat([source_points, new_points], axis=0, ignore_index=True)
-            source_points = source_points.sort_values(by=["column_names", "Datetime"])
+            source_points = source_points.sort_values(by=["colnme", "Datetime"])
             source_points = source_points.ffill()
             source_points.loc[:, "intervals"] = (
-                source_points[["x", "column_names"]]
-                .groupby(by="column_names")
+                source_points[["x", "colnme"]]
+                .groupby(by="colnme")
                 .transform("diff")
                 .fillna(0.0)
                 .x
@@ -651,22 +651,22 @@ class Parameteriser:
         """Build interpolation source points for None, "par_freq" and "at_rate_changes" methods"""
         if self.par_freq == "at_rate_changes":
             source_points = self.stress.diff().melt(
-                var_name="column_names", ignore_index=False
+                var_name="colnme", ignore_index=False
             )  # value_name (stress rate) is left at "value"
             # add first and last entry as a par too
             source_points["firstdt"] = (
                 source_points.assign(Datetime=source_points.index)[
-                    ["Datetime", "column_names"]
+                    ["Datetime", "colnme"]
                 ]
-                .groupby(by="column_names")
+                .groupby(by="colnme")
                 .transform("min")
                 .Datetime
             )
             source_points["lastdt"] = (
                 source_points.assign(Datetime=source_points.index)[
-                    ["Datetime", "column_names"]
+                    ["Datetime", "colnme"]
                 ]
-                .groupby(by="column_names")
+                .groupby(by="colnme")
                 .transform("max")
                 .Datetime
             )
@@ -682,8 +682,8 @@ class Parameteriser:
             source_points["x"] = self._dtindex_to_days_elapsed(source_points.index)
             # define geostat variogram range for parameter interpolation (in krig_t space)
             source_points.loc[:, "intervals"] = (
-                source_points[["x", "column_names"]]
-                .groupby(by="column_names")
+                source_points[["x", "colnme"]]
+                .groupby(by="colnme")
                 .transform("diff")
                 .fillna(0.0)
                 .x
@@ -694,8 +694,8 @@ class Parameteriser:
                 source_points = self._force_stress_par_freq_max(source_points)
 
             source_points.loc[:, "median_intervals"] = (
-                source_points[["intervals", "column_names"]]
-                .groupby(by="column_names")
+                source_points[["intervals", "colnme"]]
+                .groupby(by="colnme")
                 .transform("median")
                 .intervals
             )
@@ -713,7 +713,7 @@ class Parameteriser:
                 )
                 stress_pars.loc[stress_pars.index] = self.stress.loc[stress_pars.index]
             source_points = stress_pars.melt(
-                var_name="column_names", ignore_index=False
+                var_name="colnme", ignore_index=False
             )  # value_name (stress rate) is left at "value"
             # convert stress datetime to timedelta from t0 as float(totaldays) for kriging
             source_points["x"] = self._dtindex_to_days_elapsed(source_points.index)
@@ -732,19 +732,19 @@ class Parameteriser:
         ):  # - a single parameter per stress TimeSeries, which is applied constant in time
             # constant-in-time scaling parameter applied
             source_points = self.stress.iloc[[0], :].melt(
-                var_name="column_names", ignore_index=False
+                var_name="colnme", ignore_index=False
             )  # value_name (stress rate) is left at "value"
         else:
             logger.error(f"Unsupported value for par_freq provided ({self.par_freq}).")
             raise Exception
 
         source_points = source_points.reset_index(drop=False).set_index(
-            ["column_names", "Datetime"]
+            ["colnme", "Datetime"]
         )
         source_points["value"] = (
-            self.stress.melt(var_name="column_names", ignore_index=False)
+            self.stress.melt(var_name="colnme", ignore_index=False)
             .reset_index(drop=False)
-            .set_index(["column_names", "Datetime"])["value"]
+            .set_index(["colnme", "Datetime"])["value"]
         )
         if self.par_freq_max is not None:
             source_points.loc[:, "value"] = source_points.value.ffill()
@@ -759,10 +759,10 @@ class Parameteriser:
         )  # parameterised by pstfrom
         copy_file(self.modelfile, solver.temp_ws / self.modelfile.name)
 
-        index_cols = [source_points.index.name, "column_names"]
+        index_cols = [source_points.index.name, "colnme"]
         use_cols = ["value"]
         pargp_indices = (
-                source_points.column_names != source_points.column_names.shift()
+                source_points.colnme != source_points.colnme.shift()
         ).cumsum()
         pargp = pargp_indices.apply(
             lambda s: f"{self.parameteriser_name}.{str(s).zfill(2)}"
@@ -828,10 +828,10 @@ class Parameteriser:
 
         # assign parnme to source_points; make all df indices a mux: (stressmodelname,datetime)
         self.stress_pars = self.stress_pars.reset_index(drop=False).set_index(
-            ["column_names", "Datetime"]
+            ["colnme", "Datetime"]
         )
         self.source_points = self.source_points.reset_index(drop=False).set_index(
-            ["column_names", "Datetime"]
+            ["colnme", "Datetime"]
         )
         self.source_points["parnme"] = self.stress_pars.parnme
 

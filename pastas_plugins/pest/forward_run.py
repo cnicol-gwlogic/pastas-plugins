@@ -14,7 +14,7 @@ def run() -> None:
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
     from pastas_plugins.pest.obs_penalties import (
-        ColocatedStressContribPenalties, BetweenStressContribPenalties
+        ColocatedStressContribPenalties, BetweenStressContribPenalties, sanitise_differences,
     ) # noqa: F401
 
     # base path
@@ -129,9 +129,9 @@ def run() -> None:
             contribs_all = contribs_all.reset_index(drop=False).melt(
                 id_vars="date",
                 value_vars=contribs_all.columns,
-                var_name="column_names",
+                var_name="colnme",
                 value_name="Observations",
-            ).set_index(["column_names","date"])
+            ).set_index(["colnme","date"])
             contribs_all.to_csv(fpath / f"sim_stress_contribs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
             # stress contribution penalties
@@ -142,6 +142,7 @@ def run() -> None:
                     set_to_max_difference_percent=False,
                     max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
                 )
+                colocated_differences = sanitise_differences(colocated_differences)
                 colocated_differences.to_csv(
                     f"sim_stress_contrib_colocated_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
                 )
@@ -150,6 +151,7 @@ def run() -> None:
                     between_bore_pairs=sim_stress_contrib_between_bore_pairs, 
                     sm_contribs=contribs_all, set_to_zero=False,
                 )
+                between_bore_differences = sanitise_differences(between_bore_differences)
                 between_bore_differences.to_csv(
                     f"sim_stress_contrib_between_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
                 )
@@ -176,7 +178,7 @@ def run_pypestworker(
     from pandas.tseries.offsets import MonthEnd
     from pastas_plugins.pest.parameterisers import Parameteriser  # noqa: F401
     from pastas_plugins.pest.obs_penalties import (
-        ColocatedStressContribPenalties, BetweenStressContribPenalties
+        ColocatedStressContribPenalties, BetweenStressContribPenalties, sanitise_differences
     )  # noqa: F401
 
     ppw = pyemu.os_utils.PyPestWorker(
@@ -319,9 +321,9 @@ def run_pypestworker(
                 contribs_all = contribs_all.reset_index(drop=False).melt(
                     id_vars="date",
                     value_vars=contribs_all.columns,
-                    var_name="column_names",
+                    var_name="colnme",
                     value_name="Observations",
-                ).set_index(["column_names", "date"])
+                ).set_index(["colnme", "date"])
                 obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                 contribs_all.index = obsnmes.values
                 # store the series
@@ -335,6 +337,7 @@ def run_pypestworker(
                         set_to_max_difference_percent=False,
                         max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
                     ).loc[:,"Observations"]
+                    colocated_differences = sanitise_differences(colocated_differences)
                     # TODO IMPLEMENT THIS OBSNME BIT
                     #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                     #colocated_differences.index = obsnmes.values
@@ -343,6 +346,7 @@ def run_pypestworker(
                         between_bore_pairs=sim_stress_contrib_between_bore_pairs,
                         sm_contribs=contribs_all, set_to_zero=False,
                     ).loc[:,"Observations"]
+                    between_bore_differences = sanitise_differences(between_bore_differences)
                     # TODO IMPLEMENT THIS OBSNME BIT
                     #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                     #colocated_differences.index = obsnmes.values

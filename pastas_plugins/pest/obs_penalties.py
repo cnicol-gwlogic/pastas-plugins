@@ -31,7 +31,7 @@ class StressContribPenaltySettings:
         Default is True
     between_penalty_stress_contribution_groups: list | None
         Stress contribution groups for which penalties are applied based on the group's well locations' centroid.
-        All names must be in the column_names field of solver.sm_contribs.
+        All names must be in the colnme field of solver.sm_contribs.
         Default is an empty list.
     between_penalty_max_distance_from_connecting_line: float
         Default is 1000.0
@@ -56,6 +56,34 @@ class StressContribPenaltySettings:
         # warn user of critical point
         logger.warning("IMPORTANT NOTE: All models in solver.models must use the SAME stress direction (up OR down) "
                        "for penalty_obs to work correctly.")
+
+def sanitise_differences(differences: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replace index names with pyemu-friendly names, and force/check date index is datetime dtype.
+
+    Parameters
+    ----------
+    differences: pd.DataFrame
+        colocated or between_bore stress constribution differences from either
+        ColocatedStressContribPenalties.get_colocated_differences() or
+        BetweenStressContribPenalties.get_colocated_differences()
+
+    Returns
+    -------
+    differences: pd.DataFrame
+        As per input, except replaced index names with pyemu-friendly names, and forced date index to datetime dtype.
+    """
+    # make a copy of the original (probably too-long for pyemu/pest) columns
+    #orig_index_names = differences.index.names
+    #differences.loc[:, differences.index.names] = differences.index.values
+    # replace index name _ with . for pest/pyemu - underscores mess with pyemus obsnme convention / identifying indexes etc
+    differences.index.names = [str(n).replace('_', '.') for n in differences.index.names]
+    penalty_index_names = differences.index.names
+    # ensure dt index - seems flaky
+    differences.reset_index(drop=False, inplace=True)
+    differences["date"] = pd.to_datetime(differences.date)
+    differences.set_index(penalty_index_names, inplace=True)
+    return differences
 
 class ColocatedStressContribPenalties:
     """
@@ -136,16 +164,16 @@ class ColocatedStressContribPenalties:
         Returns
         ----------
         differences: pd.Series
-            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'colnme', 'date')
         """
-        penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
+        penalty_index_names = ['ml_name', 'ml_name_r', 'colnme', 'date']
         differences = pd.DataFrame(
             index=pd.MultiIndex.from_tuples([], names=penalty_index_names),
             columns=['Observations'],
         )
         for ml_name, df in colocated_bores.groupby(level='ml_name'):
             for ml_name_r, row in df.xs(ml_name).iterrows():
-                # get contribs df indexed by (column_names, date)
+                # get contribs df indexed by (colnme, date)
                 ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"]
                 ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"]
                 # subtract one from the other and assign to (ml_name, ml_name_r)
@@ -153,13 +181,13 @@ class ColocatedStressContribPenalties:
                 # convert to % of larger contribution
                 max = ml_contribs.combine(ml_contribs_r, np.maximum, fill_value=np.nan).round(6)
                 diff = (
-                               diff.abs() / max).dropna() * 100.0  # na() entries are uncommon stress contribution names (column_names)
+                               diff.abs() / max).dropna() * 100.0  # na() entries are uncommon stress contribution names (colnme)
                 diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
                 print(diff.index.get_level_values('date').dtype)
                 if set_to_max_difference_percent:
                     diff.loc[
                         :, :] = max_difference_percent  # reset values to max_difference_percent - for now we want a target obs diff of < max_difference_percent
-                # keep only those ml_name / ml_name_r / column_names / date not already in differences
+                # keep only those ml_name / ml_name_r / colnme / date not already in differences
                 drop_mask = diff.index.isin(differences.index.values)
                 differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
         differences[
@@ -181,18 +209,13 @@ class ColocatedStressContribPenalties:
         Returns
         ----------
         differences: pd.Series
-            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'colnme', 'date')
         """
         differences = ColocatedStressContribPenalties.get_colocated_differences(
             self.colocated_bores, sm_contribs, set_to_max_difference_percent, self.max_difference_percent
         )
-        # replace _ with . for pest/pyemu - underscores mess with pyemus obsnme convention / identifying indexes etc
-        differences.index.names = [n.replace('_','.') for n in differences.index.names]
+        differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
-        # ensure dt index - seems flaky
-        differences.reset_index(drop=False, inplace=True)
-        differences["date"] = pd.to_datetime(differences.date)
-        differences.set_index(self.penalty_index_names, inplace=True)
         # save the data
         self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_colocated_penalties.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
@@ -464,9 +487,9 @@ class BetweenStressContribPenalties:
         Returns
         -------
         differences: pd.Series
-            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'colnme', 'date')
         """
-        penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
+        penalty_index_names = ['ml_name', 'ml_name_r', 'colnme', 'date']
         differences = pd.DataFrame(
             index=pd.MultiIndex.from_arrays([[]] * len(penalty_index_names), names=penalty_index_names)
         )
@@ -476,7 +499,7 @@ class BetweenStressContribPenalties:
             # ml_name / ml_name_r are the adjacent bore (model) pairs for which a given stress contribution should be
             # less for ml_name than ml_name_r
             for ml_name_r, row in adjacent_bores.set_index("ml_name_r").iterrows():
-                # get contribs df indexed by (column_names, date) - .abs() is to overcome pastas stress up vs down flag
+                # get contribs df indexed by (colnme, date) - .abs() is to overcome pastas stress up vs down flag
                 ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"].abs()
                 ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"].abs()
                 if max_only:
@@ -489,7 +512,7 @@ class BetweenStressContribPenalties:
                 diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
                 if set_to_zero:
                     diff.loc[:, :] = 0.0  # reset values to 0.0 - for now we want a target obs diff of < 0.0
-                # keep only those ml_name / ml_name_r / column_names / date not already in differences
+                # keep only those ml_name / ml_name_r / colnme / date not already in differences
                 drop_mask = diff.index.isin(differences.index.values)
                 differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
         return differences
@@ -508,16 +531,11 @@ class BetweenStressContribPenalties:
         Returns
         ----------
         differences: pd.Series
-            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'colnme', 'date')
         """
         differences = BetweenStressContribPenalties.get_between_bores_differences(self.between_bore_pairs, sm_contribs, set_to_zero)
-        # replace _ with . for pest/pyemu - underscores mess with pyemus obsnme convention / identifying indexes etc
-        differences.index.names = [str(n).replace('_','.') for n in differences.index.names]
+        differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
-        # ensure dt index - seems flaky
-        differences.reset_index(drop=False, inplace=True)
-        differences["date"] = pd.to_datetime(differences.date)
-        differences.set_index(self.penalty_index_names, inplace=True)
         # save the data
         self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_between_penalties.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
