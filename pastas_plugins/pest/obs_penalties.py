@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-from typing import Optional
+from typing import Optional, Callable
 from shutil import copy as copy_file
 from pathlib import Path
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-from pastas_plugins.pest.solver import PestSolver
 
 
 logger = logging.getLogger(__name__)
@@ -38,8 +37,7 @@ class StressContribPenaltySettings:
         Default is 1000.0
     between_penalty_obs_phi_factor: float
         Default is 0.1
-    solver: Optional[PestSolver | None]
-        Default is None
+    solver: PestSolver | None
     """
     colocated_penalty_obs: Optional[bool] = True
     colocated_penalty_max_separation_distance: Optional[float] = 250.0
@@ -49,7 +47,7 @@ class StressContribPenaltySettings:
     between_penalty_stress_contribution_groups: Optional[list] = Field(default_factory=list)
     between_penalty_max_distance_from_connecting_line: Optional[float] = 1000.0
     between_penalty_obs_phi_factor: Optional[float] = 0.1
-    solver: Optional[PestSolver | None] = None
+    solver = None
     if colocated_penalty_obs or between_penalty_obs:
         logger.warning(
             "User beware! stress_contribution_penalty_obs require that model.oseries.metadata['x'] "
@@ -59,106 +57,6 @@ class StressContribPenaltySettings:
         logger.warning("IMPORTANT NOTE: All models in solver.models must use the SAME stress direction (up OR down) "
                        "for penalty_obs to work correctly.")
 
-def get_colocated_differences(
-        colocated_bores: gpd.GeoDataFrame,
-        sm_contribs: pd.DataFrame,
-        set_to_max_difference_percent: bool,
-        max_difference_percent: float) -> pd.Series:
-    """
-    Calculate stress_contribution differences between colocated models (obs bores).
-
-    Parameters
-    ----------
-    colocated_bores: gpd.GeoDataFrame
-        Multi-indexed by (ml_name, ml_name_r) with values being geometry and near geometry (geometry_r).
-        "ml_name_r" is the colocated (nearby, within max_separation_distance of ml_name) obs bore.
-    sm_contribs: pd.DataFrame
-        Stressmodel contributions
-    set_to_max_difference_percent: bool
-        Set values to max_difference_percent (e.g. for observation target creation).
-    max_difference_percent: float
-        Maximum % difference between stress contributions for colocated bores. Percent calculated based on the
-        element-wise maximum of the two series being compared.
-
-    Returns
-    ----------
-    differences: pd.Series
-        Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
-    """
-    penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
-    differences = pd.DataFrame(
-        index=pd.MultiIndex.from_arrays([[]] ** len(penalty_index_names), names=penalty_index_names)
-    )
-    for ml_name, colocated_bores in colocated_bores.groupby(level='ml_name'):
-        for ml_name_r, df in colocated_bores:
-            # get contribs df indexed by (column_names, date)
-            ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"]
-            ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"]
-            # subtract one from the other and assign to (ml_name, ml_name_r)
-            diff = (ml_contribs.abs() - ml_contribs_r.abs())  # assume same stress direction (user beware)
-            # convert to % of larger contribution
-            max = ml_contribs.combine(ml_contribs_r, np.maximum, fill_value=np.nan)
-            diff = (
-                               diff.abs() / max).dropna() * 100.0  # na() entries are uncommon stress contribution names (column_names)
-            diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
-            if set_to_max_difference_percent:
-                diff.loc[
-                    :, :] = max_difference_percent  # reset values to max_difference_percent - for now we want a target obs diff of < max_difference_percent
-            # keep only those ml_name / ml_name_r / column_names / date not already in differences
-            drop_mask = diff.index.isin(differences.index.values)
-            differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
-    differences["max_difference_percent"] = max_difference_percent # save for forward_run use, future use of variable values per bore
-    return differences
-
-def get_between_bores_differences(
-        between_bore_pairs: gpd.GeoDataFrame,
-        sm_contribs: pd.DataFrame,
-        set_to_zero: bool
-) -> pd.DataFrame:
-    """
-
-    Parameters
-    ----------
-    between_bore_pairs: gpd.GeoDataFrame
-        MultiIndexed by (stress_contribution_group, buffer_name, ml_name); column ml_name_r is the next closest
-        model to ml_name and separation_distance is the separation distance between them.
-        In other words, adjacent bore pairs within a given model's line buffer from the model to the
-        stressor are each [ml_name, ml_name_r] combo.
-    sm_contribs: pd.DataFrame
-        Stressmodel contributions
-    set_to_zero: bool
-        Set values to zero (e.g. for observation target creation).
-
-    Returns
-    -------
-    differences: pd.Series
-        Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
-    """
-    penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
-    differences = pd.DataFrame(
-        index=pd.MultiIndex.from_arrays([[]] * len(penalty_index_names), names=penalty_index_names)
-    )
-    for (stress_contribution_group, buffer_name, ml_name), adjacent_bores in between_bore_pairs.groupby(
-            level=["stress_contribution_group", "buffer_name", "ml_name"]
-    ):
-        # ml_name / ml_name_r are the adjacent bore (model) pairs for which a given stress contribution should be
-        # less for ml_name than ml_name_r
-        for ml_name_r, df in adjacent_bores.set_index("ml_name_r"):
-            # get contribs df indexed by (column_names, date)
-            ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"]
-            ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"]
-            # subtract one from the other and assign to (ml_name, ml_name_r)
-            # need to be careful here depending on pastas model stress direction 'up' vs 'down'.
-            # here we make a dangerous assumption that all models in solver.models use the same stress direction (up OR down)
-            diff = (ml_contribs.abs() - ml_contribs_r.abs())  # ml_contribs_r contrib should be > ml_contribs
-            diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
-            if set_to_zero:
-                diff.loc[:, :] = 0.0  # reset values to 0.0 - for now we want a target obs diff of < 0.0
-            # keep only those ml_name / ml_name_r / column_names / date not already in differences
-            drop_mask = diff.index.isin(differences.index.values)
-            differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
-    return differences
-
 class ColocatedStressContribPenalties:
     """
     Make PEST penalty obs for stress contribution differences between colocated models (obs bores).
@@ -167,15 +65,16 @@ class ColocatedStressContribPenalties:
     """
     def __init__(
             self,
-            settings: StressContribPenaltySettings
+            settings: StressContribPenaltySettings,
     ):
         self.solver = settings.solver
         self.solver.assign_model_coords(force_update=True)
         self.max_separation_distance = settings.colocated_penalty_max_separation_distance
         self.max_difference_percent = settings.colocated_penalty_max_difference_percent
 
-        self.colocated_bores = self._get_colocated_bores(models=self.solver.models)
+        self.colocated_bores = self._get_colocated_bores()
         self.solver.colocated_bores = self.colocated_bores
+        self.obsgp = f"less_than_stress_contrib_penalty_colocated"
         self.difference_obs = self._calc_differences(self.solver.sm_contribs)
         # warn user of critical point
         logger.warning("IMPORTANT NOTE: All models in solver.models must use the SAME stress direction (up OR down) "
@@ -195,12 +94,16 @@ class ColocatedStressContribPenalties:
             "ml_name_r" is the colocated (nearby, within max_separation_distance of ml_name) obs bore.
         """
         ml_gdf = self.solver.ml_gdf.reset_index(drop=False)
-        nearest = gpd.sjoin_nearest(
+        colocated_bores = gpd.sjoin_nearest(
             ml_gdf, ml_gdf, how='inner',
-            lsuffix="", rsuffix="_r",
-            max_distance=self.max_separation_distance
+            lsuffix="", rsuffix="r",
+            max_distance=self.max_separation_distance,
+            exclusive=True,
         )
-        colocated_bores = nearest.loc[nearest.ml_name != nearest["ml_name_r"]]
+        colocated_bores.rename(columns={"ml_name_": "ml_name"}, inplace=True)
+        # drop duplicate pairs
+        sorted_pairs = np.sort(colocated_bores[["ml_name", "ml_name_r"]], axis=1)
+        colocated_bores = colocated_bores.loc[pd.DataFrame(sorted_pairs).duplicated(keep='first').values]
         colocated_bores.set_index(["ml_name", "ml_name_r"], inplace=True)
         # save the data
         self.colocated_bores_file = Path(self.solver.model_ws / f"sim_stress_contrib_colocated_bores.csv")
@@ -208,7 +111,62 @@ class ColocatedStressContribPenalties:
         copy_file(self.colocated_bores_file, self.solver.temp_ws)
         return colocated_bores
 
-    def _calc_differences(self, sm_contribs: pd.DataFrame, set_to_max_difference_percent: bool=True) -> pd.Series:
+    @staticmethod
+    def get_colocated_differences(
+            colocated_bores: gpd.GeoDataFrame,
+            sm_contribs: pd.DataFrame,
+            set_to_max_difference_percent: bool,
+            max_difference_percent: float) -> pd.Series:
+        """
+        Calculate stress_contribution differences between colocated models (obs bores).
+
+        Parameters
+        ----------
+        colocated_bores: gpd.GeoDataFrame
+            Multi-indexed by (ml_name, ml_name_r) with values being geometry and near geometry (geometry_r).
+            "ml_name_r" is the colocated (nearby, within max_separation_distance of ml_name) obs bore.
+        sm_contribs: pd.DataFrame
+            Stressmodel contributions
+        set_to_max_difference_percent: bool
+            Set values to max_difference_percent (e.g. for observation target creation).
+        max_difference_percent: float
+            Maximum % difference between stress contributions for colocated bores. Percent calculated based on the
+            element-wise maximum of the two series being compared.
+
+        Returns
+        ----------
+        differences: pd.Series
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+        """
+        penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
+        differences = pd.DataFrame(
+            index=pd.MultiIndex.from_tuples([], names=penalty_index_names),
+            columns=['Observations'],
+        )
+        for ml_name, df in colocated_bores.groupby(level='ml_name'):
+            for ml_name_r, row in df.xs(ml_name).iterrows():
+                # get contribs df indexed by (column_names, date)
+                ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"]
+                ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"]
+                # subtract one from the other and assign to (ml_name, ml_name_r)
+                diff = (ml_contribs.abs() - ml_contribs_r.abs()).round(6)  # assume same stress direction (user beware)
+                # convert to % of larger contribution
+                max = ml_contribs.combine(ml_contribs_r, np.maximum, fill_value=np.nan).round(6)
+                diff = (
+                               diff.abs() / max).dropna() * 100.0  # na() entries are uncommon stress contribution names (column_names)
+                diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
+                print(diff.index.get_level_values('date').dtype)
+                if set_to_max_difference_percent:
+                    diff.loc[
+                        :, :] = max_difference_percent  # reset values to max_difference_percent - for now we want a target obs diff of < max_difference_percent
+                # keep only those ml_name / ml_name_r / column_names / date not already in differences
+                drop_mask = diff.index.isin(differences.index.values)
+                differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
+        differences[
+            "max_difference_percent"] = max_difference_percent  # save for forward_run use, future use of variable values per bore
+        return differences
+
+    def _calc_differences(self, sm_contribs: pd.DataFrame, set_to_max_difference_percent: bool = True) -> pd.Series:
         """
         Calculate stress_contribution differences between colocated models (obs bores).
 
@@ -225,10 +183,16 @@ class ColocatedStressContribPenalties:
         differences: pd.Series
             Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
         """
-        differences = get_colocated_differences(
+        differences = ColocatedStressContribPenalties.get_colocated_differences(
             self.colocated_bores, sm_contribs, set_to_max_difference_percent, self.max_difference_percent
         )
+        # replace _ with . for pest/pyemu - underscores mess with pyemus obsnme convention / identifying indexes etc
+        differences.index.names = [n.replace('_','.') for n in differences.index.names]
         self.penalty_index_names = differences.index.names
+        # ensure dt index - seems flaky
+        differences.reset_index(drop=False, inplace=True)
+        differences["date"] = pd.to_datetime(differences.date)
+        differences.set_index(self.penalty_index_names, inplace=True)
         # save the data
         self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_colocated_penalties.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
@@ -243,15 +207,15 @@ class ColocatedStressContribPenalties:
         ----------
         pst_from_obs_df: pd.DataFrame
         """
-        obsgp = f"less_than_stress_contrib_penalty_colocated"
         self.solver.pf.add_observations(
             self.penalty_file.name,
             index_cols=self.penalty_index_names,
             use_cols=["Observations"],
-            obsgp=obsgp,
+            obsgp=self.obsgp,
         )
         self.solver.pf.obs_dfs[-1]["weight"] = 1.0
         return self.solver.pf.obs_dfs[-1]
+
 
 class BetweenStressContribPenalties:
     """
@@ -305,6 +269,7 @@ class BetweenStressContribPenalties:
         self.between_bore_pairs = self._get_between_bore_pairs()
 
         # make difference penalty obs for between_bore_pairs
+        self.obsgp = f"less_than_stress_contrib_penalty_between"
         self.difference_obs = self._calc_differences(self.solver.sm_contribs)
 
         # warn user of critical point
@@ -321,18 +286,18 @@ class BetweenStressContribPenalties:
             MultiIndexed by ["stress_contribution_group", "ml_name"], with values being a Point of the
             centroid of the given stress_contribution_group for the given model (ml_name).
         """
-        mux = index=pd.MultiIndex.from_product([[]]*2, names=["stress_contribution_group", "ml_name"])
-        sm_contrib_group_centroids = pd.DataFrame(mux)
+        mux = index=pd.MultiIndex.from_tuples([], names=["stress_contribution_group", "ml_name"])
+        sm_contrib_group_centroids = pd.DataFrame(columns=["geometry"], index=mux)
         for stress_contribution_group in self.stress_contribution_groups:
-            ml_sm_contrib_centroids = {}
             for ml_name,ml in self.solver.models.items():
                 contrib_group_istresses = self.solver.stress_contribution_groups.loc[
                     (ml_name, stress_contribution_group)
                 ].istress_names.values
                 coords = self.solver.sm_gdf.loc[
                     (ml_name, slice(None), contrib_group_istresses)
-                ].reset_index(drop=False).dissolve(by="istress_names", aggfunc='mean') # sm_df has a block of istress_names for every model/stressmodel)
-                sm_contrib_group_centroids.loc[(stress_contribution_group, ml_name), "geometry"] = coords.centroid
+                ].reset_index(drop=False).drop(columns=["ml_name","sm_name"]).dissolve(by="istress_name", aggfunc='mean') # sm_gdf has a block of istress_names for every model/stressmodel)
+                sm_contrib_group_centroids.loc[(stress_contribution_group, ml_name), "geometry"] = \
+                    coords.union_all().centroid
 
         return gpd.GeoDataFrame(sm_contrib_group_centroids, geometry="geometry")
 
@@ -343,31 +308,56 @@ class BetweenStressContribPenalties:
 
         Returns
         -------
-        models_in_buffers: gpd.GeoDataFrame
+        between_bores: gpd.GeoDataFrame
+            Obs bores (models) within max_distance_from_connecting_line to specified stressor(s)
+            (stress_contribution_group(s)) for every model (obs bore) in the pestsolver.
             MultiIndexed by (stress_contribution_group, buffer_name, ml_name) with values being distance_to_sm_contrib,
-            sm_contrib_centroid, and geometry (Point of ml_loc).
+            sm_contrib_centroid, and geometry (model location to which the line buffer / contained other obs bores
+            is assessed).
         """
-        mux = index=pd.MultiIndex.from_product([[]]*3, names=["stress_contribution_group", "buffer_name", "ml_name"])
-        _models_in_buffers = pd.DataFrame(mux)
+        mux = index=pd.MultiIndex.from_tuples([], names=["stress_contribution_group", "buffer_name", "ml_name"])
+        _models_in_buffers = gpd.GeoDataFrame(columns=["geometry"], index=mux)
         for stress_contribution_group in self.stress_contribution_groups:
             sm_contrib_centroids = self.sm_contrib_group_centroids.xs(stress_contribution_group).geometry # indexed by ml_name
             ml_locs = self.solver.ml_gdf.geometry # indexed by ml_name
             lines = ml_locs.shortest_line(sm_contrib_centroids, align=True)
-            buffers = lines.buffer(self.max_distance_from_connecting_line, cap_style='flat')
+            buffers = gpd.GeoDataFrame(
+                index=lines.index,
+                geometry=lines.buffer(self.max_distance_from_connecting_line, cap_style='flat')
+            )
             buffers["stress_contribution_group"] = stress_contribution_group
             buffers["sm_contrib_centroid"] = sm_contrib_centroids.geometry
-            buffers["distance_to_sm_contrib"] = lines.geometry.length
             # shrink buffers where models are within self.max_distance_from_connecting_line of stressor - DEACTIVATED FOR NOW - CONSIDER
             #mask = (buffers.distance_to_sm_contrib < self.max_distance_from_connecting_line)
             #buffers.loc[mask, "geometry"] = lines.loc[mask].buffer(buffers.loc[mask].distance_to_sm_contrib, cap_style='flat')
             buffers["buffer_name"] = buffers.index
             models_in_buffers = gpd.sjoin(
-                gpd.GeoDataFrame(data=dict(ml_name=self.solver.ml_gdf.index.values), geometry=ml_locs),
+                self.solver.ml_gdf.reset_index(drop=False).loc[:,["ml_name","geometry"]],
                 gpd.GeoDataFrame(data=buffers, geometry="geometry"),
-                how="inner", predicate="within")
+                how="inner", predicate="covered_by"
+            )
+            models_in_buffers["ml_left_geom"] = self.solver.ml_gdf.loc[models_in_buffers.ml_name_left].geometry.values
+            models_in_buffers["distance_to_sm_contrib"] = models_in_buffers.sm_contrib_centroid.distance(
+                models_in_buffers.ml_left_geom
+            )
+            models_in_buffers["sm_contrib_centroid.x"] = models_in_buffers.sm_contrib_centroid.x
+            models_in_buffers["sm_contrib_centroid.y"] = models_in_buffers.sm_contrib_centroid.y
+            models_in_buffers = models_in_buffers.drop(
+                columns=["ml_name_right", "ml_left_geom", "sm_contrib_centroid"]
+            ).rename(columns={"ml_name_left": "ml_name"})
             models_in_buffers.set_index(["stress_contribution_group", "buffer_name", "ml_name"], inplace=True) # can have lots of models in a given buffer
-            models_in_buffers = pd.concat([_models_in_buffers, models_in_buffers], ignore_index=False)
-        return models_in_buffers
+            _models_in_buffers = pd.concat([_models_in_buffers, models_in_buffers], ignore_index=False)
+        between_bores = _models_in_buffers
+        # sort by distance to stressor (descending far to near)
+        between_bores.sort_values(
+            by=["stress_contribution_group", "buffer_name", "distance_to_sm_contrib"],
+            ascending=[True, True, False],
+            inplace=True
+        )
+        self.between_bores_file = Path(self.solver.model_ws / f"sim_stress_contrib_between_bores.gpkg")
+        between_bores.to_file(self.between_bores_file)
+        copy_file(self.between_bores_file, self.solver.temp_ws)
+        return between_bores
 
     def _get_between_bore_pairs(self):
         """
@@ -383,32 +373,126 @@ class BetweenStressContribPenalties:
             In other words, adjacent bore pairs within a given model's line buffer from the model to the
             stressor are each [ml_name, ml_name_r] combo.
         """
-        # sort by distance to stressor (descending far to near)
-        model_pairs_in_buffers = self.between_bores.sort_values(
-            by=["stress_contribution_group", "buffer_name", "distance_to_sm_contrib"],
-            ascending=[True, True, False]
-        )
+        model_pairs_in_buffers = self.between_bores.copy()
         # make bore pairs
-        model_pairs_in_buffers["ml_name_r"] = model_pairs_in_buffers.reset_index(drop=False).groupby(
+        model_pairs_in_buffers.reset_index(drop=False, inplace=True)
+        model_pairs_in_buffers["ml_name_r"] = model_pairs_in_buffers.groupby(
             by=["stress_contribution_group", "buffer_name"], group_keys=False
         ).apply(lambda x: x.ml_name.shift(-1), include_groups=False)
         # drop those with no closer obs bore to stressor
         model_pairs_in_buffers.dropna(subset=["ml_name_r"], inplace=True)
+        # separation distance
+        model_pairs_in_buffers["geometry_right"] = self.solver.ml_gdf.loc[
+            model_pairs_in_buffers.ml_name_r].geometry.values
+        model_pairs_in_buffers["separation_distance"] = model_pairs_in_buffers.geometry.distance(
+            model_pairs_in_buffers.geometry_right
+        )
         # drop bore pairs within self.exclude_sep_distance of one another
-        model_pairs_in_buffers["separation_distance"] = model_pairs_in_buffers.loc[
-            :, ["ml_name", "ml_name_r"]].apply(
-            lambda x: self.solver.ml_gdf.loc[x.ml_name].geometry.distance(
-                self.solver.ml_gdf.loc[x.ml_name_r].geometry
-            ))
         keep_mask = (model_pairs_in_buffers.separation_distance > self.exclude_sep_distance)
         model_pairs_in_buffers = model_pairs_in_buffers.loc[keep_mask].copy()
-        # prep return object
-        model_pairs_in_buffers.set_index(["stress_contribution_group", "buffer_name","ml_name"], inplace=True)
+        model_pairs_in_buffers.set_index(["stress_contribution_group", "buffer_name", "ml_name"], inplace=True)
         # save the data
         self.between_bore_pairs_file = Path(self.solver.model_ws / f"sim_stress_contrib_between_bore_pairs.csv")
         model_pairs_in_buffers.to_csv(self.between_bore_pairs_file)
         copy_file(self.between_bore_pairs_file, self.solver.temp_ws)
         return model_pairs_in_buffers
+
+    @staticmethod
+    def dt_series_to_stat(
+            dt_series: pd.Series,
+            stat: Optional[str | Callable]="max",
+    ) -> pd.Series:
+        """
+        Convert a datetime Series to a Statistic Series.
+
+        Parameters
+        ----------
+        dt_series: pd.Series
+            datetime series with numeric values. Can be multiindexed.
+        stat: Optional[str | Callable]
+            Pandas statistic keyword or callable function used to calculate the returned statistic.
+            Default is 'max'.
+
+        Returns
+        -------
+        s_stat: pd.Series
+            Single element Series with mean date of datetime index
+        """
+        value_name = dt_series.name
+        if isinstance(dt_series.index, pd.MultiIndex):
+            dt_index_name = [
+                n for n in dt_series.index.names
+                if pd.api.types.is_datetime64_any_dtype(dt_series.index.get_level_values(n))
+            ][0]
+            non_date_idx_names = [n for n in dt_series.index.names if n != dt_index_name]
+        else:
+            dt_index_name = dt_series.index.name
+        s_stat = dt_series.reset_index(drop=False)
+        if isinstance(dt_series.index, pd.MultiIndex):
+            s_stat = s_stat.groupby(by=non_date_idx_names).agg({dt_index_name: "mean", value_name: stat})
+            s_stat = s_stat.reset_index(drop=False).set_index(non_date_idx_names + [dt_index_name]).loc[:, value_name]
+        else:
+            s_stat["dummy"] = "group"
+            s_stat = s_stat.groupby(by="group").agg({dt_index_name: "mean", value_name: stat})
+            s_stat = s_stat.reset_index(drop=True).set_index(dt_index_name).loc[:, value_name]
+        return s_stat
+
+    @staticmethod
+    def get_between_bores_differences(
+            between_bore_pairs: gpd.GeoDataFrame,
+            sm_contribs: pd.DataFrame,
+            set_to_zero: bool,
+            max_only: Optional[bool] = True,
+    ) -> pd.DataFrame:
+        """
+
+        Parameters
+        ----------
+        between_bore_pairs: gpd.GeoDataFrame
+            MultiIndexed by (stress_contribution_group, buffer_name, ml_name); column ml_name_r is the next closest
+            model to ml_name and separation_distance is the separation distance between them.
+            In other words, adjacent bore pairs within a given model's line buffer from the model to the
+            stressor are each [ml_name, ml_name_r] combo.
+        sm_contribs: pd.DataFrame
+            Stressmodel contributions
+        set_to_zero: bool
+            Set values to zero (e.g. for observation target creation).
+        max_only: Optional[bool]
+            Flag whether to include full difference timeseries, or define difference as the difference between maximum
+             timeseries values. May expose this option later - can end up with huge obs files...
+
+        Returns
+        -------
+        differences: pd.Series
+            Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
+        """
+        penalty_index_names = ['ml_name', 'ml_name_r', 'column_names', 'date']
+        differences = pd.DataFrame(
+            index=pd.MultiIndex.from_arrays([[]] * len(penalty_index_names), names=penalty_index_names)
+        )
+        for (stress_contribution_group, buffer_name, ml_name), adjacent_bores in between_bore_pairs.groupby(
+                level=["stress_contribution_group", "buffer_name", "ml_name"]
+        ):
+            # ml_name / ml_name_r are the adjacent bore (model) pairs for which a given stress contribution should be
+            # less for ml_name than ml_name_r
+            for ml_name_r, row in adjacent_bores.set_index("ml_name_r").iterrows():
+                # get contribs df indexed by (column_names, date) - .abs() is to overcome pastas stress up vs down flag
+                ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"].abs()
+                ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"].abs()
+                if max_only:
+                    ml_contribs = BetweenStressContribPenalties.dt_series_to_stat(ml_contribs, stat="max")
+                    ml_contribs_r = BetweenStressContribPenalties.dt_series_to_stat(ml_contribs_r, stat="max")
+                # subtract one from the other and assign to (ml_name, ml_name_r)
+                # need to be careful here depending on pastas model stress direction 'up' vs 'down'. Hence .abs() above.
+                # here we make a dangerous assumption that all models in solver.models use the same stress direction (up OR down)
+                diff = (ml_contribs - ml_contribs_r)  # ml_contribs_r contrib should be > ml_contribs
+                diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
+                if set_to_zero:
+                    diff.loc[:, :] = 0.0  # reset values to 0.0 - for now we want a target obs diff of < 0.0
+                # keep only those ml_name / ml_name_r / column_names / date not already in differences
+                drop_mask = diff.index.isin(differences.index.values)
+                differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
+        return differences
 
     def _calc_differences(self, sm_contribs: pd.DataFrame, set_to_zero: bool=True) -> pd.Series:
         """
@@ -426,8 +510,14 @@ class BetweenStressContribPenalties:
         differences: pd.Series
             Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'column_names', 'date')
         """
-        differences = get_between_bores_differences(self.between_bore_pairs, sm_contribs, set_to_zero)
+        differences = BetweenStressContribPenalties.get_between_bores_differences(self.between_bore_pairs, sm_contribs, set_to_zero)
+        # replace _ with . for pest/pyemu - underscores mess with pyemus obsnme convention / identifying indexes etc
+        differences.index.names = [str(n).replace('_','.') for n in differences.index.names]
         self.penalty_index_names = differences.index.names
+        # ensure dt index - seems flaky
+        differences.reset_index(drop=False, inplace=True)
+        differences["date"] = pd.to_datetime(differences.date)
+        differences.set_index(self.penalty_index_names, inplace=True)
         # save the data
         self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_between_penalties.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
@@ -442,7 +532,6 @@ class BetweenStressContribPenalties:
         ----------
         pst_from_obs_df: pd.DataFrame
         """
-        self.obsgp = f"less_than_stress_contrib_penalty_between"
         self.solver.pf.add_observations(
             self.penalty_file.name,
             index_cols=self.penalty_index_names,

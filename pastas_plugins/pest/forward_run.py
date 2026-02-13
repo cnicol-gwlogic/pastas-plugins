@@ -13,7 +13,9 @@ def run() -> None:
     from pastas.io.base import load as load_model
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
-    from pastas_plugins.pest.obs_penalties import get_colocated_differences, get_between_bores_differences   # noqa: F401
+    from pastas_plugins.pest.obs_penalties import (
+        ColocatedStressContribPenalties, BetweenStressContribPenalties
+    ) # noqa: F401
 
     # base path
     fpath = Path(__file__).parent
@@ -134,7 +136,7 @@ def run() -> None:
 
             # stress contribution penalties
             if sim_stress_contrib_colocated_bores is not None:
-                colocated_differences = get_colocated_differences(
+                colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
                     colocated_bores=sim_stress_contrib_colocated_bores,
                     sm_contribs=contribs_all,
                     set_to_max_difference_percent=False,
@@ -144,7 +146,7 @@ def run() -> None:
                     f"sim_stress_contrib_colocated_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
                 )
             if sim_stress_contrib_between_bore_pairs is not None:
-                between_bore_differences = get_between_bores_differences(
+                between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
                     between_bore_pairs=sim_stress_contrib_between_bore_pairs, 
                     sm_contribs=contribs_all, set_to_zero=False,
                 )
@@ -170,10 +172,12 @@ def run_pypestworker(
 ) -> None:
     from logging import getLogger
 
-    from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
-    from pastas_plugins.pest.obs_penalties import get_colocated_differences, get_between_bores_differences   # noqa: F401
     from pandas import concat, date_range
     from pandas.tseries.offsets import MonthEnd
+    from pastas_plugins.pest.parameterisers import Parameteriser  # noqa: F401
+    from pastas_plugins.pest.obs_penalties import (
+        ColocatedStressContribPenalties, BetweenStressContribPenalties
+    )  # noqa: F401
 
     ppw = pyemu.os_utils.PyPestWorker(
         pst=pst,
@@ -325,7 +329,7 @@ def run_pypestworker(
 
                 # stress contribution penalties
                 if sim_stress_contrib_colocated_bores is not None:
-                    colocated_differences = get_colocated_differences(
+                    colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
                         colocated_bores=sim_stress_contrib_colocated_bores,
                         sm_contribs=contribs_all,
                         set_to_max_difference_percent=False,
@@ -335,7 +339,7 @@ def run_pypestworker(
                     #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                     #colocated_differences.index = obsnmes.values
                 if sim_stress_contrib_between_bore_pairs is not None:
-                    between_bore_differences = get_between_bores_differences(
+                    between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
                         between_bore_pairs=sim_stress_contrib_between_bore_pairs,
                         sm_contribs=contribs_all, set_to_zero=False,
                     ).loc[:,"Observations"]

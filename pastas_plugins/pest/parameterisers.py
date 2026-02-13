@@ -239,6 +239,7 @@ class Parameteriser:
         -------
         None
         """
+        sill, logmask = None, None
         if self.par_bounds is not None:
             sill = self.par_bounds.loc[self.source_points.index, ["parubnd", "parlbnd"]]
             if "partrans" not in sill.columns:

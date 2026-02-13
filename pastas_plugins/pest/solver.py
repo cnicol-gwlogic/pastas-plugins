@@ -25,7 +25,9 @@ from scipy.spatial import distance_matrix
 from pastas_plugins.pest.forward_run import run, run_pypestworker
 from pypestutils.pestutilslib import PestUtilsLib
 
-from pastas_plugins.pest.obs_penalties import StressContribPenaltySettings, ColocatedStressContribPenalties
+from pastas_plugins.pest.obs_penalties import (
+    StressContribPenaltySettings, ColocatedStressContribPenalties, BetweenStressContribPenalties
+)
 
 pputils = PestUtilsLib()  # the constructor searches for the shared lib
 
@@ -164,6 +166,7 @@ class PestSolver(BaseSolver):
             logger = logging.getLogger(__name__)
 
         self.logger = logger
+        self.date_format = date_format
 
         BaseSolver.__init__(self, pcov=pcov, nfev=nfev, **kwargs)
         self.long_names = long_names
@@ -210,6 +213,8 @@ class PestSolver(BaseSolver):
                 colocated_penalty_obs=False,
                 between_penalty_obs=False
             )
+        else:
+            self.stress_contribution_penalty_obs = stress_contribution_penalty_obs
         self.phi_factors: DataFrame = pd.DataFrame() if phi_factors is None else phi_factors
         self.multimodel_pastas_prior_pcov_info: Series = multimodel_pastas_prior_pcov_info
         if self.multimodel_pastas_prior_pcov_info is not None:
@@ -498,27 +503,27 @@ class PestSolver(BaseSolver):
 
         # stressmodel contribution difference penalties (colocated bores)
         adjust_phi_factors_down = 0.0
+        self.stress_contribution_penalty_obs.solver = self
         if self.stress_contribution_penalty_obs.colocated_penalty_obs:
+            logger.info("Making colocated stress contribution penalty obs")
             self.colocated_diff_obs = ColocatedStressContribPenalties(
-                solver=self,
-                max_separation_distance=self.stress_contribution_penalty_obs.colocated_max_separation_distance,
-                max_difference_percent=self.stress_contribution_penalty_obs.colocated_max_difference_percent,
+                settings=self.stress_contribution_penalty_obs,
             )
             adjust_phi_factors_down += self.stress_contribution_penalty_obs.colocated_penalty_obs_phi_factor
         # stressmodel contribution difference penalties (for smaller contributions to bores closer vs further from stressor)
         if self.stress_contribution_penalty_obs.between_penalty_obs:
+            logger.info("Making stress contribution penalty obs so contribs are larger closer toward stressor")
             self.between_diff_obs = BetweenStressContribPenalties(
-                solver=self,
-                max_separation_distance=self.stress_contribution_penalty_obs.between_penalty_max_distance_from_connecting_line,
+                settings=self.stress_contribution_penalty_obs,
             )
             adjust_phi_factors_down += self.stress_contribution_penalty_obs.between_penalty_obs_phi_factor
         # adjust phi factors to allow for these two penalty groups' visibility
         if adjust_phi_factors_down > 0.0:
-            phi_factors -= (phi_factors * adjust_phi_factors_down)
+            self.phi_factors -= (self.phi_factors * adjust_phi_factors_down)
             if self.stress_contribution_penalty_obs.colocated_penalty_obs:
-                phi_factors.loc[self.colocated_diff_obs.obsgp] = self.stress_contribution_penalty_obs.colocated_penalty_obs_phi_factor
+                self.phi_factors.loc[self.colocated_diff_obs.obsgp] = self.stress_contribution_penalty_obs.colocated_penalty_obs_phi_factor
             if self.stress_contribution_penalty_obs.between_penalty_obs:
-                phi_factors.loc[self.between_diff_obs.obsgp] = self.stress_contribution_penalty_obs.between_penalty_obs_phi_factor
+                self.phi_factors.loc[self.between_diff_obs.obsgp] = self.stress_contribution_penalty_obs.between_penalty_obs_phi_factor
 
         # setup parameters
         pars_list = []
@@ -672,7 +677,8 @@ class PestSolver(BaseSolver):
         coords = (self.coordinates, self.ml_xy, self.ml_gdf)
         match coords:
             # guard against repeatedly re-assigning coords
-            case _ if (None in coords | force_update):
+            case _ if any([True if c is None else False for c in coords]) or force_update:
+                logger.info("Updating model spatial coordinates")
                 self.coordinates = np.array([
                     [ml.oseries.metadata["x"], ml.oseries.metadata["y"]]
                     for ml_name, ml in self.models.items()
@@ -681,9 +687,11 @@ class PestSolver(BaseSolver):
                     index=pd.Index(list(self.models.keys()), name="ml_name"),
                     columns=["x", "y"], data=self.coordinates
                 )
+                self.ml_xy.to_csv(Path(self.model_ws / f"model_locations.csv"))
                 self.ml_gdf = gpd.GeoDataFrame(
                     index=self.ml_xy.index, geometry=gpd.points_from_xy(self.ml_xy.x, self.ml_xy.y)
                 )
+                self.ml_gdf.to_file(Path(self.model_ws / f"model_locations.gpkg"))
             case _:
                 return
 
@@ -697,7 +705,7 @@ class PestSolver(BaseSolver):
         coords = (self.sm_xy, self.sm_gdf)
         match coords:
             # guard against repeatedly re-assigning coords
-            case _ if (None in coords | force_update):
+            case _ if any([True if c is None else False for c in coords]) or force_update:
                 idx = pd.MultiIndex.from_arrays([[]]*3,
                     names=["ml_name", "sm_name", "istress_name"])
                 sm_xy = pd.DataFrame(index=idx)
@@ -708,15 +716,17 @@ class PestSolver(BaseSolver):
                         sm_xlocs += [stress.metadata["x"] for stress in sm.stress]
                         sm_ylocs += [stress.metadata["y"] for stress in sm.stress]
                         sm_stressnames += [stress.name for stress in sm.stress]
-                        ml_names += [ml_name] * len(sm_xlocs)
-                        sm_names += [sm_name] * len(sm_xlocs)
+                        ml_names += [ml_name] * len(sm.stress)
+                        sm_names += [sm_name] * len(sm.stress)
                         new_idx = pd.MultiIndex.from_arrays([ml_names, sm_names, sm_stressnames], names=idx.names)
                         new_data = pd.DataFrame(index=idx.union(new_idx), data=dict(x=sm_xlocs, y=sm_ylocs))
                         sm_xy = pd.concat([sm_xy, new_data], ignore_index=False)
                 self.sm_xy = sm_xy
+                self.sm_xy.to_csv(Path(self.model_ws / f"stressmodel_locations.csv"))
                 self.sm_gdf = gpd.GeoDataFrame(
                     index=self.sm_xy.index, geometry=gpd.points_from_xy(self.sm_xy.x, self.sm_xy.y)
                 )
+                self.sm_gdf.to_file(Path(self.model_ws / f"stressmodel_locations.gpkg"))
             case _:
                 return
 
@@ -727,26 +737,6 @@ class PestSolver(BaseSolver):
     ) -> pyemu.Cov:
         """Builds a spatial covariance matrix between each pastas parameter across all models, by distance"""
         self.assign_model_coords()
-
-        def _get_models_vario_range():
-            """get xy coords of each model and calc a separation distance matrix. Calc a separation distance matrix,
-            find n nearest neighbout and get avg sep dist."""
-            dist_matrix = pd.DataFrame(
-                data=distance_matrix(self.coordinates, self.coordinates, p=2),
-                index=list(self.models.keys()),
-                columns=list(self.models.keys()),
-            )
-            # for each model, find n nearest other models and get average separation distance --> vario range (not for constant_d)
-            n_neighbours = int(self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_neighbours"])
-            sep_dist_mult = self.multimodel_pastas_prior_pcov_info.loc["other_pars_pp_separation_multiple"]
-            models_vario_range = pd.Series(
-                index=list(self.models.keys()),
-                data=[dist_matrix.loc[:, ml_name].drop(ml_name).sort_values().iloc[:n_neighbours].mean() * sep_dist_mult
-                      for ml_name in self.models.keys()
-                      ],
-            )
-
-            return models_vario_range, ml_xy
 
         def _get_model_smodel_vario_range():
             """get xy coords of mid point between each model and its stresses. Calc a separation distance matrix,
@@ -782,10 +772,9 @@ class PestSolver(BaseSolver):
             )
             return models_stresses_vario_range, mod2stress_xy
 
-        models_vario_range, ml_xy = _get_models_vario_range()
         models_stresses_vario_range, mod2stress_xy = _get_model_smodel_vario_range()
 
-        # use pst.parameter_data to assign range (from models_vario_range) and variance (from parbounds) per model name
+        # use pst.parameter_data to assign range (from models_stresses_vario_range) and variance (from parbounds) per model name
         par_df = pst.parameter_data.loc[pastas_ml_pars].copy()
         par_df["pastas_parnme"] = par_df.index.to_series().apply(lambda x: x.split("_parnames:")[-1])
         par_df["ml_code"] = par_df.pastas_parnme.str[:len(list(self.models.values())[0].oseries.metadata["ml_code"])] # all should be the same len
@@ -817,7 +806,7 @@ class PestSolver(BaseSolver):
         # update constant_d range and sill specifically
         par_df.loc[constant_d_mask, "ps_vario_range"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_range"]
         par_df.loc[constant_d_mask, "ps_vario_sill"] = self.multimodel_pastas_prior_pcov_info.loc["constant_d_sill"]
-        par_df.loc[constant_d_mask, ["x","y"]] = ml_xy.loc[par_df.loc[constant_d_mask].ml_name, ["x","y"]].values
+        par_df.loc[constant_d_mask, ["x","y"]] = self.ml_xy.loc[par_df.loc[constant_d_mask].ml_name, ["x","y"]].values
 
         par_df.to_csv(self.temp_ws / f"pest.prior.parcovs.par_info.csv", date_format=self.date_format)
 
@@ -982,6 +971,7 @@ class PestSolver(BaseSolver):
                     done_stress_contrib_files.append(mod_file)
 
         # stress contribution penalties - colocated bores <x% difference of max
+        logger.info("Setting up PEST files for penalty obs...")
         if self.stress_contribution_penalty_obs.colocated_penalty_obs:
             penalty_obs = self.colocated_diff_obs.make_difference_obs()
         # stress contribution penalties - bores (models) located between a specified stress contribution group centroid
@@ -1021,7 +1011,7 @@ class PestSolver(BaseSolver):
             phi_factor_file = str(self.pf.new_d / "pest.phi_factors.csv")
             self.phi_factors.to_csv(phi_factor_file, header=None)
             pst.pestpp_options.update({"ies_phi_factor_file": Path(phi_factor_file).name})
-        elif self.phi_factors != {}:
+        elif not self.phi_factors.empty:
             # TODO: manually edit weights based on initial simulation residuals (pest_hp / glm cases)
             logger.warning("Phi factor prior weighting for PEST-HP / PESTPP-GLM is not yet supported.")
             pass
