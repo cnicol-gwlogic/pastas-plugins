@@ -217,7 +217,7 @@ class ColocatedStressContribPenalties:
         differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
         # save the data
-        self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_colocated_penalties.csv")
+        self.penalty_file = Path(self.solver.model_ws / f"sim_str_cont_coloc_pen.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
         copy_file(self.penalty_file, self.solver.temp_ws)
         return differences
@@ -537,7 +537,7 @@ class BetweenStressContribPenalties:
         differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
         # save the data
-        self.penalty_file = Path(self.solver.model_ws / f"sim_stress_contrib_between_penalties.csv")
+        self.penalty_file = Path(self.solver.model_ws / f"sim_str_cont_bw_pen.csv")
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
         copy_file(self.penalty_file, self.solver.temp_ws)
         return differences
