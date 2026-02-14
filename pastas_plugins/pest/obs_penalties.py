@@ -91,6 +91,7 @@ class ColocatedStressContribPenalties:
     Forward run makes these penalty obs after all pastas (obs bore) models are run.
     Initial obs values are colocated_penalty_max_difference_percent, and they are less_than type.
     """
+    OUTPUT_PENALTY_FILE = "sim_str_cont_coloc_pen.csv"
     def __init__(
             self,
             settings: StressContribPenaltySettings,
@@ -217,7 +218,7 @@ class ColocatedStressContribPenalties:
         differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
         # save the data
-        self.penalty_file = Path(self.solver.model_ws / f"sim_str_cont_coloc_pen.csv")
+        self.penalty_file = Path(self.solver.model_ws / ColocatedStressContribPenalties.OUTPUT_PENALTY_FILE)
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
         copy_file(self.penalty_file, self.solver.temp_ws)
         return differences
@@ -270,8 +271,8 @@ class BetweenStressContribPenalties:
         Adjacent obs bore pairs from between_bores (ml_name, ml_name_r), listed sequentially from those furthest from
         the stressor.
     difference_obs: gpd.GeoDataFrame
-
     """
+    OUTPUT_PENALTY_FILE = "sim_str_cont_bw_pen.csv"
     def __init__(
             self,
             settings: StressContribPenaltySettings
@@ -537,7 +538,7 @@ class BetweenStressContribPenalties:
         differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names
         # save the data
-        self.penalty_file = Path(self.solver.model_ws / f"sim_str_cont_bw_pen.csv")
+        self.penalty_file = Path(self.solver.model_ws / BetweenStressContribPenalties.OUTPUT_PENALTY_FILE)
         differences.to_csv(self.penalty_file, date_format=self.solver.date_format)
         copy_file(self.penalty_file, self.solver.temp_ws)
         return differences

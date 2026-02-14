@@ -34,7 +34,7 @@ def run() -> None:
             sim_stress_contrib_colocated_bores = read_csv(
                 "sim_stress_contrib_colocated_bores.csv", index_col=["ml_name", "ml_name_r"]
             )
-        if Path(f"sim_stress_contrib_colocated_bores.csv").exists():
+        if Path(f"sim_stress_contrib_between_bore_pairs.csv").exists():
             sim_stress_contrib_between_bore_pairs = read_csv(
                 "sim_stress_contrib_between_bore_pairs.csv",
                 index_col=["stress_contribution_group", "buffer_name","ml_name"],
@@ -144,7 +144,7 @@ def run() -> None:
                 )
                 colocated_differences = sanitise_differences(colocated_differences)
                 colocated_differences.to_csv(
-                    f"sim_stress_contrib_colocated_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
+                    ColocatedStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
                 )
             if sim_stress_contrib_between_bore_pairs is not None:
                 between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
@@ -153,9 +153,8 @@ def run() -> None:
                 )
                 between_bore_differences = sanitise_differences(between_bore_differences)
                 between_bore_differences.to_csv(
-                    f"sim_stress_contrib_between_penalties.csv", date_format="%d/%m/%Y", float_format='%.16f'
+                    BetweenStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
                 )
-
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
