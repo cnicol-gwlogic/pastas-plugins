@@ -133,6 +133,7 @@ def run() -> None:
                 var_name="colnme",
                 value_name="Observations",
             ).set_index(["colnme","date"])
+            contribs_all["model_name"] = ml_name
             contribs_all.to_csv(fpath / f"sim_stress_contribs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
             # stress contribution penalties
@@ -324,6 +325,7 @@ def run_pypestworker(
                     var_name="colnme",
                     value_name="Observations",
                 ).set_index(["colnme", "date"])
+                contribs_all["model_name"] = ml_name
                 obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
                 contribs_all.index = obsnmes.values
                 # store the series
