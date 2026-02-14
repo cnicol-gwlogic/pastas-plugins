@@ -134,6 +134,7 @@ class ColocatedStressContribPenalties:
         sorted_pairs = np.sort(colocated_bores[["ml_name", "ml_name_r"]], axis=1)
         colocated_bores = colocated_bores.loc[pd.DataFrame(sorted_pairs).duplicated(keep='first').values]
         colocated_bores.set_index(["ml_name", "ml_name_r"], inplace=True)
+        colocated_bores.max_difference_percent = self.max_difference_percent
         # save the data
         self.colocated_bores_file = Path(self.solver.model_ws / f"sim_stress_contrib_colocated_bores.csv")
         colocated_bores.to_csv(self.colocated_bores_file)
@@ -191,8 +192,6 @@ class ColocatedStressContribPenalties:
                 # keep only those ml_name / ml_name_r / colnme / date not already in differences
                 drop_mask = diff.index.isin(differences.index.values)
                 differences = pd.concat([differences, diff.loc[~drop_mask]], ignore_index=False)
-        differences[
-            "max_difference_percent"] = max_difference_percent  # save for forward_run use, future use of variable values per bore
         return differences
 
     def _calc_differences(self, sm_contribs: pd.DataFrame, set_to_max_difference_percent: bool = True) -> pd.Series:
