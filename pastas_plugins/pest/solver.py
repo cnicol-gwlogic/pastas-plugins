@@ -1781,6 +1781,11 @@ class PestIesSolver(PestSolver):
         pestpp_options = {} if pestpp_options is None else pestpp_options
         pst.pestpp_options.update(pestpp_options)
 
+        # sanitise parval1 vs parubnd and prlbnd - avoid precision issues
+        pst.parameter_data["parval1"] = pst.parameter_data.parval1.clip(
+            lower=pst.parameter_data.parlbnd, upper=pst.parameter_data.parubnd
+        )
+
         self.write_pst(pst=pst, version=2)
 
         pyemu.os_utils.start_workers(

@@ -13,8 +13,9 @@ def run() -> None:
     from pastas.io.base import load as load_model
 
     from pastas_plugins.pest.parameterisers import Parameteriser   # noqa: F401
+    import pastas_plugins.pest.obs_penalties as obs_pen
     from pastas_plugins.pest.obs_penalties import (
-        ColocatedStressContribPenalties, BetweenStressContribPenalties, sanitise_differences,
+        ColocatedStressContribPenalties, BetweenStressContribPenalties
     ) # noqa: F401
 
     # base path
@@ -142,7 +143,7 @@ def run() -> None:
                     set_to_max_difference_percent=False,
                     max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
                 )
-                colocated_differences = sanitise_differences(colocated_differences)
+                colocated_differences = obs_pen.sanitise_differences(colocated_differences)
                 colocated_differences.to_csv(
                     ColocatedStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
                 )
@@ -151,7 +152,7 @@ def run() -> None:
                     between_bore_pairs=sim_stress_contrib_between_bore_pairs, 
                     sm_contribs=contribs_all, set_to_zero=False,
                 )
-                between_bore_differences = sanitise_differences(between_bore_differences)
+                between_bore_differences = obs_pen.sanitise_differences(between_bore_differences)
                 between_bore_differences.to_csv(
                     BetweenStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
                 )
