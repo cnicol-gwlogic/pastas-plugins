@@ -1188,6 +1188,7 @@ class PestSolver(BaseSolver):
             "stress_obs": self.stress_obs,
             "save_stress_contributions": self.save_stress_contributions,
             "stress_contribution_groups": self.stress_contribution_groups,
+            "stress_contrib_penalty_settings": self.stress_contribution_penalty_obs,
         }
 
     def run(self, arg_str: str = "", silent: bool = False):

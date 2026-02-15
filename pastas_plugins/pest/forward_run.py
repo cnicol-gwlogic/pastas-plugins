@@ -1,6 +1,16 @@
+import warnings
 import pyemu
 from pandas import DataFrame, Series
 
+from pastas_plugins.pest.obs_penalties import (
+    StressContribPenaltySettings
+)  # noqa: F401
+
+
+# Ignore FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning)
+# Ignore RuntimeWarning
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 def run() -> None:
     # load packages
@@ -36,6 +46,7 @@ def run() -> None:
                 "sim_stress_contrib_colocated_bores.csv", index_col=["ml_name", "ml_name_r"]
             )
         if Path(f"sim_stress_contrib_between_bore_pairs.csv").exists():
+            stress_contrib_penalty_settings = dill_load(gz_open(BetweenStressContribPenalties.SETTINGS_PICKLE_FILE))
             sim_stress_contrib_between_bore_pairs = read_csv(
                 "sim_stress_contrib_between_bore_pairs.csv",
                 index_col=["stress_contribution_group", "buffer_name","ml_name"],
@@ -87,6 +98,7 @@ def run() -> None:
 
     # simulate
     stress_obs_done = []  # This is a list of stress obs indices we have already processed in an earlier pastas model in the below loop.
+    stress_contribs_list = [] # for df of sm_contribs of all models. For colocated/between_bores penalties.
     # We only want to process stress_obs once, not repeatedly for every model (the same stresses (stress Series names) may be reused across all models)
     for ml in models:
         ml_name = ml.name
@@ -134,29 +146,33 @@ def run() -> None:
                 value_name="Observations",
             ).set_index(["colnme","date"])
             contribs_all["model_name"] = ml_name
+            stress_contribs_list += [contribs_all.copy()]
             contribs_all.to_csv(fpath / f"sim_stress_contribs_{ml_name}.csv", date_format="%d/%m/%Y", float_format='%.16f')
 
-            # stress contribution penalties
-            if sim_stress_contrib_colocated_bores is not None:
-                colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
-                    colocated_bores=sim_stress_contrib_colocated_bores,
-                    sm_contribs=contribs_all,
-                    set_to_max_difference_percent=False,
-                    max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
-                )
-                colocated_differences = obs_pen.sanitise_differences(colocated_differences)
-                colocated_differences.to_csv(
-                    ColocatedStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
-                )
-            if sim_stress_contrib_between_bore_pairs is not None:
-                between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
-                    between_bore_pairs=sim_stress_contrib_between_bore_pairs, 
-                    sm_contribs=contribs_all, set_to_zero=False,
-                )
-                between_bore_differences = obs_pen.sanitise_differences(between_bore_differences)
-                between_bore_differences.to_csv(
-                    BetweenStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
-                )
+    # stress contribution penalties
+    if stress_contribs_list != []:
+        sm_contribs = concat(stress_contribs_list, axis=0, ignore_index=False)
+    if sim_stress_contrib_colocated_bores is not None:
+        colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
+            colocated_bores=sim_stress_contrib_colocated_bores,
+            sm_contribs=sm_contribs,
+            set_to_max_difference_percent=False,
+            max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
+        )
+        colocated_differences = obs_pen.sanitise_differences(colocated_differences)
+        colocated_differences.to_csv(
+            ColocatedStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
+        )
+    if sim_stress_contrib_between_bore_pairs is not None:
+        between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
+            between_bore_pairs=sim_stress_contrib_between_bore_pairs,
+            sm_contribs=sm_contribs, set_to_zero=False, max_only=True,
+            stress_contribution_groups=stress_contrib_penalty_settings.between_penalty_stress_contribution_groups,
+        )
+        between_bore_differences = obs_pen.sanitise_differences(between_bore_differences)
+        between_bore_differences.to_csv(
+            BetweenStressContribPenalties.OUTPUT_PENALTY_FILE, date_format="%d/%m/%Y", float_format='%.16f'
+        )
 
 def run_pypestworker(
     pst: str | pyemu.Pst,
@@ -172,6 +188,7 @@ def run_pypestworker(
     stress_contribution_groups: Series | None = None,
     sim_stress_contrib_colocated_bores: DataFrame | None = None,
     sim_stress_contrib_between_bore_pairs: DataFrame | None = None,
+    stress_contrib_penalty_settings: StressContribPenaltySettings | None = None,
 ) -> None:
     from logging import getLogger
 
@@ -331,27 +348,30 @@ def run_pypestworker(
                 # store the series
                 contribs_all_list.append(contribs_all.Observations)
 
-                # stress contribution penalties
-                if sim_stress_contrib_colocated_bores is not None:
-                    colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
-                        colocated_bores=sim_stress_contrib_colocated_bores,
-                        sm_contribs=contribs_all,
-                        set_to_max_difference_percent=False,
-                        max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
-                    ).loc[:,"Observations"]
-                    colocated_differences = sanitise_differences(colocated_differences)
-                    # TODO IMPLEMENT THIS OBSNME BIT
-                    #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
-                    #colocated_differences.index = obsnmes.values
-                if sim_stress_contrib_between_bore_pairs is not None:
-                    between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
-                        between_bore_pairs=sim_stress_contrib_between_bore_pairs,
-                        sm_contribs=contribs_all, set_to_zero=False,
-                    ).loc[:,"Observations"]
-                    between_bore_differences = sanitise_differences(between_bore_differences)
-                    # TODO IMPLEMENT THIS OBSNME BIT
-                    #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
-                    #colocated_differences.index = obsnmes.values
+        # stress contribution penalties
+        if contribs_all_list != []:
+            sm_contribs = concat(contribs_all_list, axis=0, ignore_index=False)
+        if sim_stress_contrib_colocated_bores is not None:
+            colocated_differences = ColocatedStressContribPenalties.get_colocated_differences(
+                colocated_bores=sim_stress_contrib_colocated_bores,
+                sm_contribs=sm_contribs,
+                set_to_max_difference_percent=False,
+                max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
+            ).loc[:,"Observations"]
+            colocated_differences = sanitise_differences(colocated_differences)
+            # TODO IMPLEMENT THIS OBSNME BIT
+            #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
+            #colocated_differences.index = obsnmes.values
+        if sim_stress_contrib_between_bore_pairs is not None:
+            between_bore_differences = BetweenStressContribPenalties.get_between_bores_differences(
+                between_bore_pairs=sim_stress_contrib_between_bore_pairs,
+                sm_contribs=sm_contribs, set_to_zero=False, max_only=True,
+                stress_contribution_groups=stress_contrib_penalty_settings.between_bore_stress_contribution_groups,
+            ).loc[:,"Observations"]
+            between_bore_differences = sanitise_differences(between_bore_differences)
+            # TODO IMPLEMENT THIS OBSNME BIT
+            #obsnmes = stress_obs_contribs.loc[contribs_all.index].obsnme
+            #between_bore_differences.index = obsnmes.values
 
         obsvals_all = concat(obsvals_list, axis=0, ignore_index=False)
         sim_smp_vals = concat(headsmp_list, axis=0, ignore_index=False)
