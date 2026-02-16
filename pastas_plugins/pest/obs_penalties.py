@@ -148,7 +148,9 @@ class ColocatedStressContribPenalties:
             colocated_bores: gpd.GeoDataFrame,
             sm_contribs: pd.DataFrame,
             set_to_max_difference_percent: bool,
-            max_difference_percent: float) -> pd.Series:
+            max_difference_percent: float,
+            min_abs_value_assess: float=0.01,
+    ) -> pd.Series:
         """
         Calculate stress_contribution differences between colocated models (obs bores).
 
@@ -164,6 +166,9 @@ class ColocatedStressContribPenalties:
         max_difference_percent: float
             Maximum % difference between stress contributions for colocated bores. Percent calculated based on the
             element-wise maximum of the two series being compared.
+        min_abs_value_assess: float
+            Minimum value across both stress contribution series, below which we do not compare % differences. Avoids
+            precision / not-meaningful effects.
 
         Returns
         ----------
@@ -184,9 +189,13 @@ class ColocatedStressContribPenalties:
                 # Below, we use .round(6) on divisors: Although rounding tends to be dangerous for pest,
                 # it can cause huge meaningless % results below...which is more dangerous.
                 diff = (ml_contribs - ml_contribs_r).abs().round(6)  # assume same stress direction (user beware)
+                diff.loc[(ml_contribs < min_abs_value_assess) & (ml_contribs_r < min_abs_value_assess)] = 0.0 # assume zero diff if both are < min threshold
                 # convert to % of larger contribution
                 max = ml_contribs.combine(ml_contribs_r, np.maximum, fill_value=np.nan).astype(float).round(6)
-                diff = (diff / max) * 100.0  # na() entries are uncommon stress contribution names (colnme)
+                uncommon_entries_mask = max.isna()
+                diff = diff[~uncommon_entries_mask]
+                max = max[~uncommon_entries_mask]
+                diff = (diff / max) * 100.0  # reverted .dropna() and added np.nan to replace below.
                 diff = diff.replace([np.nan, np.inf, -np.inf], 0.0)
                 diff = pd.concat([diff], keys=[(ml_name, ml_name_r)], names=['ml_name', 'ml_name_r'])
                 if set_to_max_difference_percent:
