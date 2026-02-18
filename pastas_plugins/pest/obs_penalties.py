@@ -27,6 +27,10 @@ class StressContribPenaltySettings:
         Default is 10.0
     colocated_penalty_obs_phi_factor: float
         Default is 0.1
+    colocated_penalty_stress_contribution_groups: list | None
+        Stress contribution groups for which penalties are applied based on the group's well locations' centroid.
+        All names must be in the colnme field of solver.sm_contribs.
+        Default is an empty list, in which case all common stress contribution groups are used.
     between_penalty_obs: bool
         Default is True
     between_penalty_stress_contribution_groups: list | None
@@ -43,6 +47,7 @@ class StressContribPenaltySettings:
     colocated_penalty_max_separation_distance: Optional[float] = 250.0
     colocated_penalty_max_difference_percent: Optional[float] = 10.0
     colocated_penalty_obs_phi_factor: Optional[float] = 0.1
+    colocated_penalty_stress_contribution_groups: Optional[list] = Field(default_factory=list)
     between_penalty_obs: Optional[bool] = True
     between_penalty_stress_contribution_groups: Optional[list] = Field(default_factory=list)
     between_penalty_max_distance_from_connecting_line: Optional[float] = 1000.0
@@ -102,6 +107,7 @@ class ColocatedStressContribPenalties:
         self.solver.assign_model_coords(force_update=True)
         self.max_separation_distance = settings.colocated_penalty_max_separation_distance
         self.max_difference_percent = settings.colocated_penalty_max_difference_percent
+        self.stress_contribution_groups = settings.colocated_penalty_stress_contribution_groups
 
         self.colocated_bores = self._get_colocated_bores()
         self.solver.colocated_bores = self.colocated_bores
@@ -149,7 +155,8 @@ class ColocatedStressContribPenalties:
             sm_contribs: pd.DataFrame,
             set_to_max_difference_percent: bool,
             max_difference_percent: float,
-            min_abs_value_assess: float=0.01,
+            min_abs_value_assess: float=0.001,
+            stress_contribution_groups: Optional[list | None] = None,
     ) -> pd.Series:
         """
         Calculate stress_contribution differences between colocated models (obs bores).
@@ -169,6 +176,8 @@ class ColocatedStressContribPenalties:
         min_abs_value_assess: float
             Minimum value across both stress contribution series, below which we do not compare % differences. Avoids
             precision / not-meaningful effects.
+        stress_contribution_groups: Optional[list | None] = None
+            Default is None, in which case all common stress contribution groups are used.
 
         Returns
         ----------
@@ -183,13 +192,17 @@ class ColocatedStressContribPenalties:
         for ml_name, df in colocated_bores.groupby(level='ml_name'):
             for ml_name_r, row in df.xs(ml_name).iterrows():
                 # get contribs df indexed by (colnme, date)
-                ml_contribs = sm_contribs.loc[sm_contribs.model_name == ml_name, "Observations"].abs()
-                ml_contribs_r = sm_contribs.loc[sm_contribs.model_name == ml_name_r, "Observations"].abs()
+                mask = (sm_contribs.model_name == ml_name)
+                rmask = (sm_contribs.model_name == ml_name_r)
+                if stress_contribution_groups is not None:
+                    mask = mask & (sm_contribs.index.get_level_values("colnme").isin(stress_contribution_groups))
+                    rmask = rmask & (sm_contribs.index.get_level_values("colnme").isin(stress_contribution_groups))
+                ml_contribs = sm_contribs.loc[mask, "Observations"].abs().clip(lower=min_abs_value_assess)
+                ml_contribs_r = sm_contribs.loc[rmask, "Observations"].abs().clip(lower=min_abs_value_assess)
                 # subtract one from the other and assign to (ml_name, ml_name_r)
                 # Below, we use .round(6) on divisors: Although rounding tends to be dangerous for pest,
                 # it can cause huge meaningless % results below...which is more dangerous.
                 diff = (ml_contribs - ml_contribs_r).abs().round(6)  # assume same stress direction (user beware)
-                diff.loc[(ml_contribs < min_abs_value_assess) & (ml_contribs_r < min_abs_value_assess)] = 0.0 # assume zero diff if both are < min threshold
                 # convert to % of larger contribution
                 max = ml_contribs.combine(ml_contribs_r, np.maximum, fill_value=np.nan).astype(float).round(6)
                 uncommon_entries_mask = max.isna()
@@ -208,7 +221,11 @@ class ColocatedStressContribPenalties:
                 differences.sort_index(inplace=True)
         return differences
 
-    def _calc_differences(self, sm_contribs: pd.DataFrame, set_to_max_difference_percent: bool = True) -> pd.Series:
+    def _calc_differences(
+            self,
+            sm_contribs: pd.DataFrame,
+            set_to_max_difference_percent: bool = True,
+    ) -> pd.Series:
         """
         Calculate stress_contribution differences between colocated models (obs bores).
 
@@ -226,7 +243,9 @@ class ColocatedStressContribPenalties:
             Stressmodel contribution differences, MultiIndexed by ('ml_name', 'ml_name_r', 'colnme', 'date')
         """
         differences = ColocatedStressContribPenalties.get_colocated_differences(
-            self.colocated_bores, sm_contribs, set_to_max_difference_percent, self.max_difference_percent
+            self.colocated_bores, sm_contribs, set_to_max_difference_percent,
+            self.max_difference_percent, min_abs_value_assess=0.001,
+            stress_contribution_groups=self.stress_contribution_groups
         )
         differences = sanitise_differences(differences)
         self.penalty_index_names = differences.index.names

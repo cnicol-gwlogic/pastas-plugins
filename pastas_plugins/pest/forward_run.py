@@ -157,7 +157,8 @@ def run() -> None:
             colocated_bores=sim_stress_contrib_colocated_bores,
             sm_contribs=sm_contribs,
             set_to_max_difference_percent=False,
-            max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent # future upgrades might allow different max diffs per bore
+            max_difference_percent=sim_stress_contrib_colocated_bores.iloc[0].max_difference_percent, # future upgrades might allow different max diffs per bore
+            stress_contribution_groups=stress_contrib_penalty_settings.colocated_penalty_stress_contribution_groups,
         )
         colocated_differences = obs_pen.sanitise_differences(colocated_differences)
         colocated_differences.to_csv(
