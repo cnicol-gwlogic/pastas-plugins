@@ -1738,7 +1738,7 @@ class PestIesSolver(PestSolver):
             )
             pst.pestpp_options["ies_observation_ensemble"] = noise_file
             pst.pestpp_options.pop("ies_no_noise", False)
-        else:
+        elif bool(pestpp_options.get("ies_no_noise", False)):
             self.write_ensemble_observation_noise(
                 standard_deviation=observation_noise_standard_deviation,
                 correlation_coefficient=observation_noise_correlation_coefficient,
@@ -1747,6 +1747,9 @@ class PestIesSolver(PestSolver):
                 "pest_starting_obs_ensemble.csv"
             )
             pst.pestpp_options.pop("ies_no_noise", False)
+        else:
+            pst.pestpp_options["ies_no_noise"] = True
+            pst.pestpp_options.pop("ies_observation_ensemble", None)
         if ies_parameter_ensemble_method is not None and ies_parameter_ensemble is None:
             self.write_ensemble_parameter_distribution(
                 method=ies_parameter_ensemble_method,
