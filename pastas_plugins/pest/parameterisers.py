@@ -156,6 +156,7 @@ class Parameteriser:
         self.stress_names = self.stress.columns.to_list()
         # stress obs data
         self.obs_data = None
+        self.obs_data_weights = None
 
         # Parameterisation things
         if par_freq:
@@ -556,22 +557,33 @@ class Parameteriser:
 
     def add_stress_obs(
             self,
-            obs_data: Optional[Series | None] = None,
+            obs_data: Optional[DataFrame | None] = None,
+            obs_field_name: Optional[str] = "Observations",
+            obs_weight_field_name: Optional[str] = "weight",
     ) -> None:
         """
         Add observations of stress rates for pest.
 
         Parameters
         ----------
-        obs_data : Optional[Series]
-            Observed stress value data points. Indexed by [colnme (bore), Datetime]
+        obs_data : Optional[DataFrame]
+            Observed stress value data points. Indexed by [colnme (bore), Datetime], columns are [Observations, weight]
+            or as provided via the two variables below.
+        obs_field_name : Optional[str]
+            Field name in obs_data to use for stress obs values. Default is "Observations".
+        obs_weight_field_name : Optional[str]
+            Field name in obs_data to use for stress obs weights. Default is "weight".
 
         Returns
         -------
         None
         """
-        self.obs_data = obs_data
+        self.obs_data = obs_data[obs_field_name]
         self.obs_data.index.names = ["colnme","date"]
+        self.obs_data.name = "Observations"
+        self.obs_data_weights = obs_data[obs_weight_field_name]
+        self.obs_data_weights.index.names = ["colnme", "date"]
+        self.obs_data_weights.name = "weight"
 
     def mod2obs(self) -> Series:
         """

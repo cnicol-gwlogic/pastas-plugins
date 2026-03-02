@@ -465,7 +465,13 @@ class PestSolver(BaseSolver):
                 sm_p_obs = sm_p.obs_data.to_frame()
                 sm_p_obs.loc[:, "model_name"] = None # parameterisers not specific to a single model in v2, so stress_obs aren't either, as they are defined through the parameteriser
                 sm_p_obs.loc[:, "obs_type"] = "stress_obs"
-                sm_p_obs.loc[:, "weight"] = 1.0
+                if sm_p.obs_data_weights is None:
+                    logger.warning(
+                        "No stressmodel parameteriser stress obs weights provided, setting all weights to 1.0"
+                    )
+                    sm_p_obs.loc[:, "weight"] = 1.0
+                else:
+                    sm_p_obs.loc[:, "weight"] = sm_p.obs_data_weights
                 stress_obs_list.append(sm_p_obs)
 
         self.stress_obs = pd.concat(
